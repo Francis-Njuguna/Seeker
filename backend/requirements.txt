@@ -1,0 +1,16 @@
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+sqlalchemy==2.0.43
+asyncpg==0.30.0
+greenlet==3.2.4
+python-multipart==0.0.20
+pillow==11.3.0
+pytesseract==0.3.13
+python-jose[cryptography]==3.5.0
+bcrypt==4.3.0
+pydantic[email]==2.11.9
+pydantic-settings==2.11.0
+aiosmtplib==4.0.2
+pytest==8.4.2
+pytest-asyncio==1.2.0
+httpx==0.28.1
