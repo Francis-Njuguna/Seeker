@@ -1,6 +1,7 @@
 """Finder flow: OCR preview, posting a found document, serving images."""
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -8,8 +9,9 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import face
 from app.database import get_db
-from app.deps import get_current_user, to_preview
+from app.deps import get_current_user, to_owner, to_preview
 from app.matching import match_new_found_id
 from app.models import FoundId, Match, MatchStatus, User
 from app.normalize import normalize_id_number, normalize_name
@@ -17,6 +19,7 @@ from app.ocr import OcrUnavailableError, extract_fields
 from app.schemas import FoundIdCreate, FoundIdOwner, OcrPreviewOut
 from app.storage import InvalidImageError, load_image, resolve_path, save_image_pair
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/found-ids", tags=["found-ids"])
 
 LOW_CONFIDENCE_THRESHOLD = 65.0
@@ -101,6 +104,8 @@ async def create_found_id(
     ocr_text = None
     ocr_confidence = None
     fields_edited = False
+    face_embedding = None
+    face_model = None
 
     if image is not None:
         raw = await image.read()
@@ -125,6 +130,18 @@ async def create_found_id(
                 # A missing OCR binary must not block posting a found document.
                 ocr_text = None
 
+        # Extract the face embedding once, here, so claimant selfie checks have
+        # something to compare against later. Best-effort by design: a missing
+        # backend or an ID with no visible portrait must not block the post.
+        if face.embedding_available():
+            try:
+                embedding = face.extract_embedding(pil_image)
+                if embedding is not None:
+                    face_embedding = face.serialize(embedding)
+                    face_model = face.MODEL_NAME
+            except Exception:  # noqa: BLE001 - never fail a post over this
+                logger.warning("face embedding extraction failed", exc_info=True)
+
     found = FoundId(
         finder_user_id=user.id,
         document_type=payload.document_type.strip().lower().replace(" ", "_"),
@@ -137,6 +154,8 @@ async def create_found_id(
         fields_edited_by_finder=fields_edited,
         image_path=image_path,
         image_blurred_path=blurred_path,
+        face_embedding=face_embedding,
+        face_embedding_model=face_model,
         found_location=payload.found_location,
         found_note=payload.found_note,
     )
@@ -147,9 +166,7 @@ async def create_found_id(
     await db.commit()
     await db.refresh(found)
 
-    out = FoundIdOwner.model_validate(found)
-    out.image_url = f"/api/found-ids/{found.id}/image" if found.image_path else None
-    return out
+    return to_owner(found)
 
 
 @router.get("/mine", response_model=list[FoundIdOwner])
@@ -161,12 +178,7 @@ async def list_my_found_ids(
         .where(FoundId.finder_user_id == user.id)
         .order_by(FoundId.created_at.desc())
     )
-    items = []
-    for found in result.scalars().all():
-        out = FoundIdOwner.model_validate(found)
-        out.image_url = f"/api/found-ids/{found.id}/image" if found.image_path else None
-        items.append(out)
-    return items
+    return [to_owner(found) for found in result.scalars().all()]
 
 
 async def _load_found(db: AsyncSession, found_id: uuid.UUID) -> FoundId:
@@ -200,9 +212,7 @@ async def get_found_id(
     """Return the full record to those entitled to it, redacted otherwise."""
     found = await _load_found(db, found_id)
     if await _viewer_has_full_access(db, found, user):
-        out = FoundIdOwner.model_validate(found)
-        out.image_url = f"/api/found-ids/{found.id}/image" if found.image_path else None
-        return out
+        return to_owner(found)
     return to_preview(found)
 
 

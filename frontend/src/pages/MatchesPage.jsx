@@ -11,6 +11,8 @@ export default function MatchesPage() {
   const [notifications, setNotifications] = useState([])
   const [error, setError] = useState('')
   const [claimIdNumber, setClaimIdNumber] = useState({})
+  const [verifying, setVerifying] = useState({})
+  const [verifyResult, setVerifyResult] = useState({})
 
   const load = useCallback(() => {
     if (!token) return
@@ -46,6 +48,31 @@ export default function MatchesPage() {
     }
   }
 
+  // Upload the seeker's own photo of the document. The server OCRs it, compares
+  // it to the finder's record, and discards the image.
+  const verifyIdentity = async (matchId, file) => {
+    if (!file) return
+    setError('')
+    setVerifying({ ...verifying, [matchId]: true })
+    try {
+      const body = new FormData()
+      body.append('image', file)
+      const response = await fetch(`/api/matches/${matchId}/verify-identity`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body,
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.detail || 'Verification failed')
+      setVerifyResult({ ...verifyResult, [matchId]: data })
+      load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setVerifying({ ...verifying, [matchId]: false })
+    }
+  }
+
   const markRead = async (id) => {
     await fetch(`/api/notifications/${id}/read`, {
       method: 'POST',
@@ -64,8 +91,8 @@ export default function MatchesPage() {
         {mine.length === 0 ? (
           <p className="muted">No matches yet.</p>
         ) : (
-          mine.map(({ match, preview }) => (
-            <RedactedPreview key={match.id} preview={preview}>
+          mine.map(({ match, preview, full }) => (
+            <RedactedPreview key={match.id} preview={preview} full={full}>
               <div className="claim-section">
                 <div className="match-meta">
                   <span className={`status status-${match.status}`}>
@@ -74,12 +101,73 @@ export default function MatchesPage() {
                   <span className="muted">
                     matched via {label(match.source)} on {label(match.matched_on)}
                   </span>
+                  {match.verification_status !== 'unverified' && (
+                    <span className={`status status-${match.verification_status}`}>
+                      verification: {label(match.verification_status)}
+                    </span>
+                  )}
                 </div>
 
                 {match.status === 'matched' && (
                   <div className="claim-form">
+                    <p className="muted">
+                      Prove it's yours by typing the full ID number, or upload a photo
+                      of your own copy of the document for automatic verification.
+                    </p>
+
+                    {match.verification_status === 'unverified' && (
+                      <div className="verify-upload">
+                        <label>
+                          Upload your own photo of this document
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => verifyIdentity(match.id, e.target.files[0])}
+                            disabled={verifying[match.id]}
+                          />
+                        </label>
+                        {verifying[match.id] && <p className="muted">Verifying...</p>}
+                        {verifyResult[match.id] && (
+                          <div
+                            className={
+                              verifyResult[match.id].verified ? 'notice ok' : 'notice warn'
+                            }
+                          >
+                            <p>{verifyResult[match.id].detail}</p>
+                            {verifyResult[match.id].verified ? (
+                              <p>
+                                You can now submit the claim below without typing the ID
+                                number.
+                              </p>
+                            ) : (
+                              <p>
+                                {verifyResult[match.id].attempts_remaining > 0
+                                  ? `${verifyResult[match.id].attempts_remaining} attempts remaining.`
+                                  : 'No attempts remaining. Type the full ID number instead.'}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {match.verification_status === 'verified' && (
+                      <p className="notice ok">
+                        Document verified. You can submit the claim without typing the
+                        number.
+                      </p>
+                    )}
+
+                    {match.verification_status === 'failed' && (
+                      <p className="notice warn">
+                        Verification failed. Type the full ID number to claim.
+                      </p>
+                    )}
+
                     <label>
-                      Enter the full ID number to prove it is yours
+                      {match.verification_status === 'verified'
+                        ? 'Full ID number (optional, already verified)'
+                        : 'Enter the full ID number to prove it is yours'}
                       <input
                         value={claimIdNumber[match.id] || ''}
                         onChange={(e) =>
@@ -88,13 +176,19 @@ export default function MatchesPage() {
                             [match.id]: e.target.value,
                           })
                         }
+                        disabled={verifying[match.id]}
                       />
                     </label>
                     <button
                       type="button"
+                      disabled={
+                        verifying[match.id] ||
+                        (match.verification_status !== 'verified' &&
+                          !claimIdNumber[match.id])
+                      }
                       onClick={() =>
                         act(`/api/matches/${match.id}/claim`, {
-                          id_number: claimIdNumber[match.id] || '',
+                          id_number: claimIdNumber[match.id] || null,
                         })
                       }
                     >
@@ -144,17 +238,30 @@ export default function MatchesPage() {
         {incoming.length === 0 ? (
           <p className="muted">No pending claims on documents you posted.</p>
         ) : (
-          incoming.map(({ match, preview }) => (
+          incoming.map(({ match, preview, full }) => (
             <div className="card" key={match.id}>
               <p>
-                Someone verified the full ID number on the{' '}
-                <strong>{label(preview.document_type)}</strong> you posted
+                Someone is claiming the{' '}
+                <strong>{label(full?.document_type || preview.document_type)}</strong>{' '}
+                you posted
                 {preview.found_location ? ` (found at ${preview.found_location})` : ''}.
               </p>
-              <p className="muted">
-                They reproduced the complete number, which only the owner should
-                know.
-              </p>
+              {match.verification_method === 'document_image' ? (
+                <p className="muted">
+                  They uploaded their own photo of the document and it matched this
+                  record automatically
+                  {match.verification_score != null
+                    ? ` (score ${match.verification_score}).`
+                    : '.'}{' '}
+                  Automated checks can be fooled, so confirm anything else you can
+                  before approving.
+                </p>
+              ) : (
+                <p className="muted">
+                  They reproduced the complete ID number, which only the owner should
+                  know.
+                </p>
+              )}
               <div className="button-row">
                 <button
                   type="button"

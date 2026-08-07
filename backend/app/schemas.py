@@ -33,6 +33,7 @@ class UserOut(ORMModel):
     id: uuid.UUID
     email: EmailStr
     display_name: str
+    role: str
     created_at: datetime
 
 
@@ -160,21 +161,71 @@ class MatchOut(ORMModel):
     source: str
     matched_on: str
     status: str
+    verification_status: str
+    verification_method: str | None
+    verification_document_type: str | None
+    verification_score: float | None
+    verification_detail: str | None
+    verification_attempts: int
+    verified_at: datetime | None
+    face_verification_status: str
+    face_confidence: float | None
+    face_attempts: int
+    face_verified_at: datetime | None
+    flagged_for_review: bool
+    flag_reason: str | None
     created_at: datetime
     claim_requested_at: datetime | None
     claimed_at: datetime | None
 
 
 class MatchWithPreview(BaseModel):
+    """A match plus what the caller is entitled to see of the document.
+
+    ``preview`` is always redacted. ``full`` is populated only once the claim is
+    approved, which is what lets the UI swap the blurred thumbnail for the real
+    photo without a second round trip.
+    """
+
     match: MatchOut
     preview: FoundIdPreview
+    full: FoundIdOwner | None = None
 
 
 class ClaimRequest(BaseModel):
-    """Ownership proof. Must reproduce the full ID number, not just the tail."""
+    """Ownership proof.
 
-    id_number: str = Field(min_length=3, max_length=128)
+    Either reproduce the full ID number, or pass the document-image check first
+    (``POST /api/matches/{id}/verify-identity``) and omit the number.
+    """
+
+    id_number: str | None = Field(default=None, max_length=128)
     message: str | None = Field(default=None, max_length=1000)
+
+
+class IdentityVerificationOut(BaseModel):
+    """Result of checking the claimant's own document against the record."""
+
+    verified: bool
+    status: str
+    score: float
+    detail: str
+    document_type: str | None
+    id_number_matched: bool
+    name_matched: bool
+    attempts_remaining: int
+
+
+class FaceVerificationOut(BaseModel):
+    """Result of comparing the claimant's selfie against the face on the record."""
+
+    verified: bool
+    status: str
+    confidence: float
+    detail: str
+    face_found_in_selfie: bool
+    flagged_for_review: bool
+    attempts_remaining: int
 
 
 class ClaimDecision(BaseModel):

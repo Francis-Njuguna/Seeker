@@ -13,7 +13,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import FoundId, User
 from app.normalize import redact_id_number, redact_name
-from app.schemas import FoundIdPreview
+from app.schemas import FoundIdOwner, FoundIdPreview
 from app.security import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -58,6 +58,17 @@ def to_preview(found: FoundId) -> FoundIdPreview:
             f"/api/found-ids/{found.id}/image/blurred" if found.image_blurred_path else None
         ),
     )
+
+
+def to_owner(found: FoundId) -> FoundIdOwner:
+    """Build the unredacted view, with the full-image URL attached.
+
+    Only hand the result to the finder or a seeker with an approved claim; the
+    access check lives in ``_viewer_has_full_access``.
+    """
+    out = FoundIdOwner.model_validate(found)
+    out.image_url = f"/api/found-ids/{found.id}/image" if found.image_path else None
+    return out
 
 
 class SlidingWindowLimiter:
@@ -112,3 +123,18 @@ def ensure_uuid(value: str) -> uuid.UUID:
         return uuid.UUID(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid identifier") from exc
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Gate admin-only routes.
+
+    Admin is assigned out of band; there is no self-service path to it.
+    """
+    from app.models import UserRole
+
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return user

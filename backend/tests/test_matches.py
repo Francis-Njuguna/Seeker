@@ -77,9 +77,10 @@ async def test_finder_sees_incoming_claim(
     assert body[0]["match"]["id"] == match_id
 
 
-async def test_approval_advances_status_to_claimed(
+async def test_approval_parks_at_awaiting_payment(
     client: httpx.AsyncClient, make_user, post_found
 ) -> None:
+    """Approval alone does not reach claimed — the payment webhook does that."""
     finder, seeker, found, match_id = await _matched_pair(client, make_user, post_found)
     await client.post(
         f"/api/matches/{match_id}/claim",
@@ -91,16 +92,34 @@ async def test_approval_advances_status_to_claimed(
         json={"approve": True},
         headers=finder.headers,
     )
-    assert response.json()["status"] == "claimed"
+    assert response.json()["status"] == "awaiting_payment"
+
+
+async def test_payment_advances_status_to_claimed(
+    client: httpx.AsyncClient, make_user, post_found, pay_for
+) -> None:
+    finder, seeker, found, match_id = await _matched_pair(client, make_user, post_found)
+    await client.post(
+        f"/api/matches/{match_id}/claim",
+        json={"id_number": "AB123456"},
+        headers=seeker.headers,
+    )
+    await client.post(
+        f"/api/matches/{match_id}/decision",
+        json={"approve": True},
+        headers=finder.headers,
+    )
+    await pay_for(match_id, seeker)
 
     # The found record tracks the same lifecycle.
     record = await client.get(f"/api/found-ids/{found['id']}", headers=finder.headers)
     assert record.json()["status"] == "claimed"
 
 
-async def test_seeker_sees_full_record_only_after_approval(
-    client: httpx.AsyncClient, make_user, post_found
+async def test_seeker_sees_full_record_only_after_payment(
+    client: httpx.AsyncClient, make_user, post_found, pay_for
 ) -> None:
+    """The security-critical one: approval is not enough, payment is."""
     finder, seeker, found, match_id = await _matched_pair(client, make_user, post_found)
 
     before = await client.get(f"/api/found-ids/{found['id']}", headers=seeker.headers)
@@ -116,6 +135,12 @@ async def test_seeker_sees_full_record_only_after_approval(
         json={"approve": True},
         headers=finder.headers,
     )
+
+    # Approved but unpaid: still redacted.
+    approved = await client.get(f"/api/found-ids/{found['id']}", headers=seeker.headers)
+    assert "id_number" not in approved.json()
+
+    await pay_for(match_id, seeker)
 
     after = await client.get(f"/api/found-ids/{found['id']}", headers=seeker.headers)
     assert after.json()["id_number"] == "AB123456"
@@ -189,9 +214,9 @@ async def test_decision_requires_a_pending_claim(
 
 
 async def test_full_lifecycle_reaches_completed(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, pay_for
 ) -> None:
-    """matched -> claim_requested -> claimed -> completed."""
+    """matched -> claim_requested -> awaiting_payment -> claimed -> completed."""
     finder, seeker, found, match_id = await _matched_pair(client, make_user, post_found)
 
     await client.post(
@@ -204,6 +229,7 @@ async def test_full_lifecycle_reaches_completed(
         json={"approve": True},
         headers=finder.headers,
     )
+    await pay_for(match_id, seeker)
     response = await client.post(
         f"/api/matches/{match_id}/complete", headers=seeker.headers
     )
@@ -214,7 +240,7 @@ async def test_full_lifecycle_reaches_completed(
 
 
 async def test_claimed_document_leaves_the_search_pool(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, pay_for
 ) -> None:
     finder, seeker, _, match_id = await _matched_pair(client, make_user, post_found)
     await client.post(
@@ -227,6 +253,7 @@ async def test_claimed_document_leaves_the_search_pool(
         json={"approve": True},
         headers=finder.headers,
     )
+    await pay_for(match_id, seeker)
 
     other = await make_user()
     search = await client.post(
@@ -235,11 +262,56 @@ async def test_claimed_document_leaves_the_search_pool(
     assert search.json()["found"] is False
 
 
-async def test_match_status_vocabulary_reserves_a_payment_state() -> None:
-    """Payments can be added between claim_requested and claimed later."""
+async def test_match_list_withholds_full_record_before_approval(
+    client: httpx.AsyncClient, make_user, post_found
+) -> None:
+    _, seeker, _, match_id = await _matched_pair(client, make_user, post_found)
+    response = await client.get("/api/matches/mine", headers=seeker.headers)
+    entry = response.json()[0]
+    assert entry["full"] is None
+    assert entry["preview"]["id_number_redacted"].endswith("56")
+
+
+async def test_match_list_carries_full_record_after_payment(
+    client: httpx.AsyncClient, make_user, post_found, pay_for
+) -> None:
+    """What the UI needs to swap the blurred thumbnail for the real photo."""
+    finder, seeker, found, match_id = await _matched_pair(client, make_user, post_found)
+    await client.post(
+        f"/api/matches/{match_id}/claim",
+        json={"id_number": "AB123456"},
+        headers=seeker.headers,
+    )
+    await client.post(
+        f"/api/matches/{match_id}/decision",
+        json={"approve": True},
+        headers=finder.headers,
+    )
+    await pay_for(match_id, seeker)
+
+    response = await client.get("/api/matches/mine", headers=seeker.headers)
+    entry = response.json()[0]
+    assert entry["full"] is not None
+    assert entry["full"]["id_number"] == "AB123456"
+    assert entry["full"]["holder_name"] == "Jane Alice Doe"
+
+
+async def test_finder_always_sees_their_own_record_in_full(
+    client: httpx.AsyncClient, make_user, post_found
+) -> None:
+    finder, seeker, _, match_id = await _matched_pair(client, make_user, post_found)
+    await client.post(
+        f"/api/matches/{match_id}/claim",
+        json={"id_number": "AB123456"},
+        headers=seeker.headers,
+    )
+    response = await client.get("/api/matches/incoming", headers=finder.headers)
+    assert response.json()[0]["full"]["id_number"] == "AB123456"
+
+
+async def test_match_status_ladder_puts_payment_before_release() -> None:
     from app.models import MatchStatus
 
-    assert MatchStatus.AWAITING_PAYMENT == "awaiting_payment"
     ladder = [s.value for s in MatchStatus]
     assert ladder.index("claim_requested") < ladder.index("awaiting_payment")
     assert ladder.index("awaiting_payment") < ladder.index("claimed")

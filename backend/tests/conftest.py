@@ -95,6 +95,52 @@ async def make_user(client: httpx.AsyncClient):
 
 
 @pytest_asyncio.fixture
+async def promote_admin(db_session: AsyncSession):
+    """Promote a user to admin.
+
+    Admin is deliberately not self-service, so there is no endpoint for this —
+    tests reach into the DB exactly as an operator would with SQL.
+    """
+    from sqlalchemy import update
+
+    from app.models import User, UserRole
+
+    async def _promote(user: UserSession) -> None:
+        await db_session.execute(
+            update(User).where(User.id == user.id).values(role=UserRole.ADMIN)
+        )
+        await db_session.commit()
+
+    return _promote
+
+
+@pytest_asyncio.fixture
+async def pay_for(client: httpx.AsyncClient):
+    """Take an approved claim through payment: initiate, then fire the webhook.
+
+    Mirrors what the mock provider's checkout page does, so tests exercise the
+    real release path rather than setting the status directly.
+    """
+
+    async def _pay(match_id: str, seeker: UserSession) -> dict:
+        started = await client.post(
+            f"/api/payments/{match_id}/initiate",
+            json={"phone": "+254700000000"},
+            headers=seeker.headers,
+        )
+        assert started.status_code == 200, started.text
+        reference = started.json()["reference"]
+
+        webhook = await client.post(
+            "/api/payments/webhook", json={"reference": reference, "status": "paid"}
+        )
+        assert webhook.status_code == 200, webhook.text
+        return {"reference": reference, **started.json(), "webhook": webhook.json()}
+
+    return _pay
+
+
+@pytest_asyncio.fixture
 async def post_found(client: httpx.AsyncClient):
     """Post a found ID without an image (skips OCR, which needs a real photo)."""
 

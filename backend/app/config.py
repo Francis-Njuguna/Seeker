@@ -37,6 +37,26 @@ class Settings(BaseSettings):
     search_rate_limit: int = 30
     search_rate_window_seconds: int = 60
 
+    # Face verification. Euclidean distance below this counts as a match; 0.6 is
+    # the face_recognition library default, not a value tuned on our own data.
+    face_match_threshold: float = 0.6
+    face_max_attempts: int = 5
+
+    # Payments. "mock" is a self-contained sandbox that needs no credentials and
+    # is what the tests exercise; "loop" talks to the real NCBA Loop sandbox once
+    # keys exist. Amounts are in minor units — 20000 = 200.00 KES.
+    payment_provider: str = "mock"
+    payment_amount_minor: int = 20000
+    payment_currency: str = "KES"
+    platform_share_ratio: float = 0.5
+
+    loop_api_url: str = "https://sandbox.loop.co.ke/api/v1/payments"
+    loop_api_key: str = ""
+    loop_webhook_secret: str = ""
+
+    # Used to build the callback URL handed to the payment provider.
+    public_base_url: str = "http://localhost:8000"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -10,7 +10,7 @@ export default defineConfig({
     // requests work without any CORS handling in the client.
     proxy: {
       '/api': {
-        target: process.env.VITE_API_PROXY || 'http://backend:8000',
+        target: process.env.VITE_API_PROXY || 'http://localhost:8000',
         changeOrigin: true,
       },
     },

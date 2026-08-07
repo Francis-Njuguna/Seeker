@@ -14,3 +14,14 @@ aiosmtplib==4.0.2
 pytest==8.4.2
 pytest-asyncio==1.2.0
 httpx==0.28.1
+
+# Face verification. dlib ships prebuilt wheels for cp312 at this version, so no
+# cmake toolchain is needed in the image. numpy is pinned below 2.0 because
+# dlib's compiled extension is built against the 1.x C ABI.
+#
+# app/face.py imports these behind a guard: if they are unavailable the selfie
+# endpoint returns 503 and the ID-number and document-image claim paths keep
+# working, so the app runs either way.
+numpy==1.26.4
+dlib==19.24.6
+face-recognition==1.3.0
