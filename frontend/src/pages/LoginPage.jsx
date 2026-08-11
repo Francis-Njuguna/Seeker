@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth.jsx'
+import { AuthLayout } from '../components/Brand.jsx'
+import Icon from '../components/Icon.jsx'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -32,36 +34,61 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="auth-page">
-      <form className="card auth-card" onSubmit={submit}>
-        <h1>Seeker</h1>
-        <p className="subtitle">Lost &amp; found for ID cards and documents</p>
-        {error && <div className="error">{error}</div>}
-        <label>
-          Email
+    <AuthLayout
+      image="/img/auth-passport.webp"
+      alt="A passport lying on a dark table"
+      quote={
+        <>
+          Someone already found it. <em>Go and get it back.</em>
+        </>
+      }
+      attribution="Every day IDs, passports and licences are picked up by strangers who want to return them. Seeker is where the two of you meet."
+    >
+      <form onSubmit={submit}>
+        <h1>Welcome back</h1>
+        <p className="subtitle">Sign in to check your matches and alerts.</p>
+
+        {error && (
+          <div className="error" role="alert">
+            <Icon.AlertTriangle />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="field">
+          <label htmlFor="email">Email</label>
           <input
+            id="email"
             type="email"
+            autoComplete="email"
+            placeholder="you@example.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
           />
-        </label>
-        <label>
-          Password
+        </div>
+
+        <div className="field">
+          <label htmlFor="password">Password</label>
           <input
+            id="password"
             type="password"
+            autoComplete="current-password"
+            placeholder="••••••••"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
           />
-        </label>
-        <button type="submit" disabled={busy}>
-          {busy ? 'Signing in...' : 'Sign in'}
+        </div>
+
+        <button type="submit" className="btn-lg" disabled={busy}>
+          {busy ? 'Signing in…' : 'Sign in'}
         </button>
-        <p className="muted">
-          No account? <Link to="/register">Create one</Link>
+
+        <p className="auth-alt">
+          No account yet? <Link to="/register">Create one</Link>
         </p>
       </form>
-    </div>
+    </AuthLayout>
   )
 }

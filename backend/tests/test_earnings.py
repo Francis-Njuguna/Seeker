@@ -180,7 +180,7 @@ async def test_an_unclaimed_document_appears_with_no_match_and_no_earning(
     assert rows[0]["match_id"] is None
     assert rows[0]["amount_earned"] == 0
     assert rows[0]["payment_status"] is None
-    assert rows[0]["status"] == "available"
+    assert rows[0]["status"] == "posted"
 
 
 async def test_earnings_report_keeps_the_id_number_redacted(

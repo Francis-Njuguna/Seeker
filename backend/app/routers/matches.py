@@ -350,6 +350,12 @@ async def verify_face(
             pil_image,
             threshold=settings.face_match_threshold,
         )
+    except face.MultiFaceError as exc:
+        # More than one face in the selfie is ambiguous, not a failed match, so
+        # it costs no attempt — the same treatment a corrupt upload gets above.
+        # Comparing against an arbitrary face would let a claimant stand next to
+        # the rightful holder and pass.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except face.FaceUnavailableError as exc:  # pragma: no cover - guarded above
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

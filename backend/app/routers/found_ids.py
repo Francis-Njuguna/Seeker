@@ -139,6 +139,12 @@ async def create_found_id(
                 if embedding is not None:
                     face_embedding = face.serialize(embedding)
                     face_model = face.MODEL_NAME
+            except face.MultiFaceError:
+                # A photo of an ID that also caught a bystander. Expected, not an
+                # error: store no embedding, so a later selfie check reports
+                # "no face on record" rather than comparing against whichever
+                # face the detector happened to return first.
+                logger.info("found_id posted with multiple faces; no embedding stored")
             except Exception:  # noqa: BLE001 - never fail a post over this
                 logger.warning("face embedding extraction failed", exc_info=True)
 

@@ -182,7 +182,9 @@ async def test_stats_group_documents_and_matches_by_status(
     body = (await client.get("/api/admin/stats", headers=admin.headers)).json()
 
     assert body["found_ids_by_status"]["claimed"] == 1
-    assert body["found_ids_by_status"]["available"] == 1
+    # "posted" is the FoundIdStatus a new document starts on (models.py), which
+    # is also the default the column carries and what matching.py branches on.
+    assert body["found_ids_by_status"]["posted"] == 1
     assert body["matches_by_status"]["claimed"] == 1
 
 

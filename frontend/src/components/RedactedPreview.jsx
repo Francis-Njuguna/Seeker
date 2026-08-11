@@ -1,5 +1,6 @@
 import { authHeaders, useAuth } from '../auth.jsx'
 import { useEffect, useState } from 'react'
+import Icon from './Icon.jsx'
 
 const label = (value) => (value || '').replace(/_/g, ' ')
 
@@ -45,6 +46,7 @@ export default function RedactedPreview({ preview, full, children }) {
     <div className="card preview-card">
       <div className="preview-header">
         <span className="doc-type">
+          <Icon.IdCard />
           {label(full?.document_type || preview.document_type)}
         </span>
         <span className={`status status-${preview.status}`}>
@@ -54,13 +56,22 @@ export default function RedactedPreview({ preview, full, children }) {
 
       <div className="preview-body">
         {imageSrc ? (
-          <img
-            src={imageSrc}
-            alt={unblurred ? 'Document photo' : 'Blurred document preview'}
-            className={unblurred ? 'full-thumb' : 'blurred-thumb'}
-          />
+          <div className={`thumb-frame ${unblurred ? 'is-unlocked' : 'is-locked'}`}>
+            <img
+              src={imageSrc}
+              alt={unblurred ? 'Document photo' : 'Blurred document preview'}
+              className={unblurred ? 'full-thumb' : 'blurred-thumb'}
+            />
+            <span className="thumb-badge">
+              {unblurred ? <Icon.Eye /> : <Icon.Lock />}
+              {unblurred ? 'Full photo' : 'Blurred'}
+            </span>
+          </div>
         ) : (
-          <div className="blurred-thumb placeholder">No photo</div>
+          <div className="thumb-frame is-empty">
+            <Icon.Camera />
+            No photo
+          </div>
         )}
 
         {full ? (
@@ -82,7 +93,9 @@ export default function RedactedPreview({ preview, full, children }) {
               </>
             )}
             <dt>Posted</dt>
-            <dd>{new Date(full.created_at).toLocaleDateString()}</dd>
+            <dd className="tabular">
+              {new Date(full.created_at).toLocaleDateString()}
+            </dd>
           </dl>
         ) : (
           <dl className="redacted-fields">
@@ -97,15 +110,20 @@ export default function RedactedPreview({ preview, full, children }) {
               </>
             )}
             <dt>Posted</dt>
-            <dd>{new Date(preview.created_at).toLocaleDateString()}</dd>
+            <dd className="tabular">
+              {new Date(preview.created_at).toLocaleDateString()}
+            </dd>
           </dl>
         )}
       </div>
 
       {!full && (
         <p className="redaction-note">
-          Details are hidden to protect the owner. Only the last two characters of
-          the ID number are shown.
+          <Icon.ShieldCheck />
+          <span>
+            Details are hidden to protect the owner. Only the last two characters
+            of the ID number are shown.
+          </span>
         </p>
       )}
 

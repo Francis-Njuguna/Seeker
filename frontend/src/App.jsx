@@ -8,6 +8,11 @@ import SearchPage from './pages/SearchPage.jsx'
 import AlertsPage from './pages/AlertsPage.jsx'
 import MatchesPage from './pages/MatchesPage.jsx'
 import Nav from './components/Nav.jsx'
+import AdminLayout, { RequireAdmin } from './admin/AdminLayout.jsx'
+import AdminOverview from './admin/AdminOverview.jsx'
+import AdminTransactions from './admin/AdminTransactions.jsx'
+import AdminClaims from './admin/AdminClaims.jsx'
+import AdminFlagged from './admin/AdminFlagged.jsx'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -66,6 +71,22 @@ export default function App() {
             </ProtectedRoute>
           }
         />
+        {/* RequireAdmin wraps the layout, so every nested admin route inherits
+            the role check — a non-admin typing /admin/transactions is bounced
+            the same as one typing /admin. */}
+        <Route
+          path="/admin"
+          element={
+            <RequireAdmin>
+              <AdminLayout />
+            </RequireAdmin>
+          }
+        >
+          <Route index element={<AdminOverview />} />
+          <Route path="transactions" element={<AdminTransactions />} />
+          <Route path="claims" element={<AdminClaims />} />
+          <Route path="flagged" element={<AdminFlagged />} />
+        </Route>
       </Routes>
     </div>
   )

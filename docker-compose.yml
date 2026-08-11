@@ -38,7 +38,11 @@ services:
     image: node:22-alpine
     working_dir: /app
     environment:
-      VITE_API_BASE: http://localhost:8000
+      # vite.config.js reads VITE_API_PROXY for the dev-server proxy target.
+      # Inside this container ``localhost`` is the container itself, where
+      # nothing listens — it has to be the backend service name, or every
+      # /api request from the browser fails with ECONNREFUSED.
+      VITE_API_PROXY: http://backend:8000
     ports:
       - "5173:5173"
     volumes:

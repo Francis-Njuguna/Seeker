@@ -8,9 +8,21 @@ import pytest_asyncio
 
 # Configure the app for testing before any app module imports settings.
 os.environ["SEEKER_TESTING"] = "1"
-os.environ.setdefault(
-    "DATABASE_URL", "postgresql+asyncpg://seeker:seeker@db:5432/seeker_test"
+
+# ``fresh_schema`` below drops every table between tests, so pointing this at a
+# real database destroys it. docker-compose sets DATABASE_URL to the *dev*
+# database for the backend service, which a plain setdefault would silently
+# inherit — so redirect to a sibling ``_test`` database instead of trusting it.
+# Set TEST_DATABASE_URL to override explicitly.
+_configured = os.environ.get(
+    "TEST_DATABASE_URL",
+    os.environ.get(
+        "DATABASE_URL", "postgresql+asyncpg://seeker:seeker@db:5432/seeker"
+    ),
 )
+if not _configured.rsplit("/", 1)[-1].endswith("_test"):
+    _configured = f"{_configured}_test"
+os.environ["DATABASE_URL"] = _configured
 os.environ.setdefault("UPLOAD_DIR", "/tmp/seeker-test-uploads")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 
