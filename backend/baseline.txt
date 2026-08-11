@@ -179,4 +179,9 @@ tests/test_payments.py::test_webhook_replay_is_idempotent PASSED         [ 82%]
 tests/test_payments.py::test_webhook_writes_exactly_one_earning_row PASSED [ 82%]
 tests/test_payments.py::test_webhook_ignores_an_unknown_reference PASSED [ 83%]
 tests/test_payments.py::test_webhook_rejects_a_payload_with_no_reference PASSED [ 83%]
-tests/test_payments.py::test_failed_payment_leaves_the_record_locked 
+tests/test_payments.py::test_failed_payment_leaves_the_record_locked PASSED [ 84%]
+tests/test_payments.py::test_pending_status_does_not_release_the_record PASSED [ 84%]
+tests/test_payments.py::test_mock_checkout_completes_the_payment PASSED  [ 85%]
+tests/test_payments.py::test_payment_notifies_both_parties PASSED        [ 85%]
+tests/test_payments.py::test_payment_status_is_seeker_only PASSED        [ 86%]
+tests/test_payments.py::test_status_classification_covers_provider_vocabulary 
