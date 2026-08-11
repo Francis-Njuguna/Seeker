@@ -184,4 +184,67 @@ tests/test_payments.py::test_pending_status_does_not_release_the_record PASSED [
 tests/test_payments.py::test_mock_checkout_completes_the_payment PASSED  [ 85%]
 tests/test_payments.py::test_payment_notifies_both_parties PASSED        [ 85%]
 tests/test_payments.py::test_payment_status_is_seeker_only PASSED        [ 86%]
-tests/test_payments.py::test_status_classification_covers_provider_vocabulary 
+tests/test_payments.py::test_status_classification_covers_provider_vocabulary PASSED [ 86%]
+tests/test_search.py::test_search_by_exact_id_number_finds_document PASSED [ 87%]
+tests/test_search.py::test_search_preview_is_redacted PASSED             [ 87%]
+tests/test_search.py::test_search_normalizes_formatting_differences PASSED [ 88%]
+tests/test_search.py::test_search_does_not_fuzzy_match PASSED            [ 88%]
+tests/test_search.py::test_search_by_exact_name_finds_document PASSED    [ 89%]
+tests/test_search.py::test_partial_name_does_not_match PASSED            [ 89%]
+tests/test_search.py::test_no_match_suggests_registering_an_alert PASSED [ 90%]
+tests/test_search.py::test_search_requires_a_query_field PASSED          [ 90%]
+tests/test_search.py::test_search_requires_authentication PASSED         [ 91%]
+tests/test_search.py::test_repeated_search_reuses_one_match PASSED       [ 91%]
+tests/test_search.py::test_search_is_rate_limited PASSED                 [ 92%]
+tests/test_verification.py::test_name_match_ignores_token_order PASSED   [ 92%]
+tests/test_verification.py::test_name_match_tolerates_a_dropped_middle_name PASSED [ 93%]
+tests/test_verification.py::test_name_match_rejects_a_different_person PASSED [ 93%]
+tests/test_verification.py::test_name_match_rejects_empty_extraction PASSED [ 94%]
+tests/test_verification.py::test_matching_document_passes PASSED         [ 94%]
+tests/test_verification.py::test_wrong_id_number_fails_even_when_the_name_matches PASSED [ 95%]
+tests/test_verification.py::test_unrelated_document_fails PASSED         [ 95%]
+tests/test_verification.py::test_student_id_verifies_against_its_own_number PASSED [ 96%]
+tests/test_verification.py::test_verification_lets_a_seeker_claim_without_the_number PASSED [ 96%]
+tests/test_verification.py::test_claim_without_number_or_verification_is_refused PASSED [ 97%]
+tests/test_verification.py::test_failed_verification_does_not_unlock_a_claim PASSED [ 97%]
+tests/test_verification.py::test_typed_number_still_works_and_is_recorded_as_such PASSED [ 98%]
+tests/test_verification.py::test_stranger_cannot_verify_someone_elses_match PASSED [ 98%]
+tests/test_verification.py::test_verification_attempts_are_capped PASSED [ 99%]
+tests/test_verification.py::test_verification_rejects_a_non_image_upload PASSED [ 99%]
+tests/test_verification.py::test_verification_does_not_apply_after_the_claim_is_approved PASSED [100%]
+
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/face_recognition_models/__init__.py:7
+  /usr/local/lib/python3.12/site-packages/face_recognition_models/__init__.py:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+    from pkg_resources import resource_filename
+
+tests/test_payments.py::test_split_halves_the_fee_and_sums_to_the_total
+  tests/test_payments.py:42: PytestWarning: The test <Function test_split_halves_the_fee_and_sums_to_the_total> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_split_halves_the_fee_and_sums_to_the_total() -> None:
+
+tests/test_payments.py::test_split_gives_an_odd_remainder_to_the_finder
+  tests/test_payments.py:52: PytestWarning: The test <Function test_split_gives_an_odd_remainder_to_the_finder> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_split_gives_an_odd_remainder_to_the_finder() -> None:
+
+tests/test_payments.py::test_amount_is_two_hundred_kes_in_minor_units
+  tests/test_payments.py:61: PytestWarning: The test <Function test_amount_is_two_hundred_kes_in_minor_units> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_amount_is_two_hundred_kes_in_minor_units() -> None:
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================= slowest 15 durations =============================
+48.89s call     tests/test_verification.py::test_verification_attempts_are_capped
+21.15s setup    tests/test_verification.py::test_verification_attempts_are_capped
+16.26s call     tests/test_ocr.py::test_tesseract_reads_rendered_card
+15.51s setup    tests/test_verification.py::test_verification_rejects_a_non_image_upload
+15.42s setup    tests/test_matches.py::test_only_finder_can_decide_a_claim
+12.27s setup    tests/test_face.py::test_an_already_verified_claim_is_not_rechecked
+11.27s call     tests/test_face_integration.py::test_an_impostor_selfie_fails_and_is_flagged_for_a_human
+10.74s call     tests/test_admin.py::test_revenue_equals_the_sum_of_paid_platform_shares
+9.90s setup    tests/test_verification.py::test_stranger_cannot_verify_someone_elses_match
+8.87s call     tests/test_admin.py::test_the_review_queue_holds_only_flagged_claims
+8.23s setup    tests/test_face_integration.py::test_a_selfie_with_no_face_is_recorded_distinctly_from_a_mismatch
+7.93s call     tests/test_earnings.py::test_earnings_accumulate_across_documents
+7.91s call     tests/test_earnings.py::test_a_finder_sees_only_their_own_earnings
+7.45s setup    tests/test_admin.py::test_claims_list_records_how_identity_was_proven
+7.30s setup    tests/test_ocr.py::test_tesseract_reads_rendered_card
+=========== 203 passed, 1 skipped, 4 warnings in 1309.04s (0:21:49) ============
