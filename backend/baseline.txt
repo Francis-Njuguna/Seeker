@@ -248,3 +248,4 @@ tests/test_payments.py::test_amount_is_two_hundred_kes_in_minor_units
 7.45s setup    tests/test_admin.py::test_claims_list_records_how_identity_was_proven
 7.30s setup    tests/test_ocr.py::test_tesseract_reads_rendered_card
 =========== 203 passed, 1 skipped, 4 warnings in 1309.04s (0:21:49) ============
+EXIT=True

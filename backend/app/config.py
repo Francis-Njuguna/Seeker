@@ -42,6 +42,22 @@ class Settings(BaseSettings):
     face_match_threshold: float = 0.6
     face_max_attempts: int = 5
 
+    # How long a claimant may hold a document out of public search before the
+    # lock lapses and it returns to circulation. Long enough to find a selfie in
+    # decent light and read the OCR fields; short enough that a document is not
+    # parked indefinitely by someone who abandoned the flow. Enforced server-side
+    # by ``claims.expire_stale_claims`` — a browser countdown releases nothing.
+    claim_timeout_hours: int = 48
+
+    # Retention windows, in days, for the periodic purge (see ``retention.py``).
+    # Kenya's Data Protection Act 2019 s.39 requires personal data not be kept
+    # longer than necessary; these encode "necessary" as a number the operator
+    # can defend, rather than leaving it to whenever someone remembers.
+    retention_returned_document_days: int = 90
+    retention_unclaimed_document_days: int = 365
+    retention_notification_days: int = 180
+    retention_audit_log_days: int = 730
+
     # Payments. "mock" is a self-contained sandbox that needs no credentials and
     # is what the tests exercise; "loop" talks to the real NCBA Loop sandbox once
     # keys exist. Amounts are in minor units — 20000 = 200.00 KES.

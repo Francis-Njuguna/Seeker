@@ -60,6 +60,21 @@ class FoundIdStatus(enum.StrEnum):
     ARCHIVED = "archived"
 
 
+# The only statuses at which a found document is discoverable by the public.
+#
+# A whitelist, not a blacklist, and deliberately so: this list previously read
+# "everything except claimed/returned/archived", which meant CLAIM_REQUESTED —
+# added to the enum later — was public by default, and a document under active
+# claim stayed searchable by anyone. Enumerating what *is* visible fails closed,
+# so a state added tomorrow is hidden until someone decides otherwise here.
+#
+# Every discovery path must filter on this: see ``matching.find_by_id_number``,
+# ``matching.find_by_name``, and the direct-fetch guard in ``routers/found_ids``.
+PUBLICLY_SEARCHABLE_FOUND_STATUSES: frozenset[str] = frozenset(
+    {FoundIdStatus.POSTED, FoundIdStatus.MATCHED}
+)
+
+
 class LostAlertStatus(enum.StrEnum):
     ACTIVE = "active"
     MATCHED = "matched"
@@ -70,6 +85,13 @@ class LostAlertStatus(enum.StrEnum):
 class MatchStatus(enum.StrEnum):
     """Lifecycle of a match.
 
+    ``CLAIM_PENDING`` is the lock-holding state. A seeker who starts a claim
+    takes the document out of public search *before* proving anything, because
+    the proof steps (OCR review, then a selfie compared against the face on the
+    document) are a multi-request workflow and the document must not stay
+    claimable by someone else while they run. Proof is required to leave this
+    state, not to enter it — see ``routers/matches.py``.
+
     An approved claim lands on ``AWAITING_PAYMENT`` and only reaches ``CLAIMED``
     once the payment provider's webhook confirms the money arrived. Because full
     record access is keyed on CLAIMED/COMPLETED, parking an approved claim here
@@ -77,12 +99,27 @@ class MatchStatus(enum.StrEnum):
     """
 
     MATCHED = "matched"
+    CLAIM_PENDING = "claim_pending"
     CLAIM_REQUESTED = "claim_requested"
     AWAITING_PAYMENT = "awaiting_payment"
     CLAIMED = "claimed"
     COMPLETED = "completed"
     REJECTED = "rejected"
     EXPIRED = "expired"
+
+
+# States in which a match holds the exclusive claim lock on its document. While
+# any match on a document is in one of these, no other seeker may start a claim
+# and the document is absent from public search.
+LOCK_HOLDING_MATCH_STATUSES: frozenset[str] = frozenset(
+    {
+        MatchStatus.CLAIM_PENDING,
+        MatchStatus.CLAIM_REQUESTED,
+        MatchStatus.AWAITING_PAYMENT,
+        MatchStatus.CLAIMED,
+        MatchStatus.COMPLETED,
+    }
+)
 
 
 class MatchSource(enum.StrEnum):
@@ -112,10 +149,23 @@ class VerificationMethod(enum.StrEnum):
 class FaceVerificationStatus(enum.StrEnum):
     """Outcome of comparing the claimant's selfie to the face on the record.
 
-    ``NO_FACE_ON_RECORD`` is kept distinct from ``FAILED``: the claimant did
-    nothing wrong, the posted photo simply had no detectable face to compare
-    against, and they should be sent down another proof path rather than told
-    they failed.
+    ``UNVERIFIED`` is the "selfie required, none submitted yet" state.
+
+    Four of these are deliberately *not* ``FAILED``, because the claimant did
+    nothing wrong in any of them and each sends them somewhere different:
+
+    * ``NO_FACE_ON_RECORD`` — the posted photo has no detectable face to compare
+      against, so no selfie can ever settle this claim. Another proof path.
+    * ``NO_FACE_IN_SELFIE`` — retry with a clearer photo.
+    * ``TOO_MANY_FACES`` — the selfie has more than one face, which is ambiguous
+      rather than wrong. Recorded distinctly so an operator reading the queue can
+      tell "could not be assessed" from "assessed and did not match".
+    * ``ATTEMPTS_EXHAUSTED`` — assessed and failed, repeatedly, and now closed to
+      further selfies. Distinct from ``FAILED`` so the admin queue shows which
+      claims a claimant can still resolve themselves.
+
+    There is no PROCESSING state: the comparison is synchronous within one
+    request, so a status meaning "in flight" would never be observable.
     """
 
     UNVERIFIED = "unverified"
@@ -123,6 +173,8 @@ class FaceVerificationStatus(enum.StrEnum):
     FAILED = "failed"
     NO_FACE_ON_RECORD = "no_face_on_record"
     NO_FACE_IN_SELFIE = "no_face_in_selfie"
+    TOO_MANY_FACES = "too_many_faces"
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
 
 
 class TransactionStatus(enum.StrEnum):
@@ -166,9 +218,26 @@ class FoundId(Base):
     id_number: Mapped[str] = mapped_column(String(128))
     id_number_normalized: Mapped[str] = mapped_column(String(128), index=True)
 
+    # Structured classification from the controlled vocabulary in ``documents.py``,
+    # kept alongside ``document_type`` rather than replacing it. The finder types
+    # ``document_type`` freely and it stays exactly as they wrote it; this column
+    # holds the recognised class, or NULL when nothing was recognised. Collapsing
+    # the two would either overwrite the finder's words or force every unusual
+    # document into a bucket it does not belong in.
+    document_class: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    classification_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # "ocr" when the classifier read it off the document, "finder" when the finder
+    # chose it. Recorded because §12 requires knowing which fields a machine
+    # produced and which a human asserted.
+    classification_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     # OCR provenance
     ocr_raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # JSON blob of the per-field extraction: value, per-field confidence, and
+    # which extractor produced it. Stored as TEXT rather than JSONB because it is
+    # only ever read back whole, and TEXT needs no migration on older Postgres.
+    ocr_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
     fields_edited_by_finder: Mapped[bool] = mapped_column(default=False)
 
     # Stored images. The blurred derivative is what unauthenticated previews use.
@@ -281,8 +350,15 @@ class Match(Base):
 
     created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(TS, default=utcnow, onupdate=utcnow)
+    # When the claimant took the exclusive lock on the document. Expiry is
+    # measured from here, not from created_at: a match can sit at MATCHED
+    # indefinitely without holding anything.
+    claim_started_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
     claim_requested_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    # Set when a sweep expires an abandoned claim, so the reason a document
+    # returned to circulation is on the record rather than inferred.
+    claim_expired_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
 
     found_id: Mapped[FoundId] = relationship(back_populates="matches")
     lost_alert: Mapped[LostAlert | None] = relationship(back_populates="matches")

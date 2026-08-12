@@ -1,14 +1,27 @@
-"""Match lifecycle: review a redacted preview, request a claim, approve it.
+"""Match lifecycle: review a redacted preview, claim, prove, approve.
 
-The status ladder is matched -> claim_requested -> awaiting_payment -> claimed
--> completed. Approval by the finder does **not** release the record: the claim
-parks at ``AWAITING_PAYMENT`` until the payment provider's webhook confirms the
-fee, and because full access is keyed on CLAIMED/COMPLETED that withholds the
-document details automatically.
+The status ladder is matched -> claim_pending -> claim_requested ->
+awaiting_payment -> claimed -> completed.
+
+``claim_pending`` is the lock. Starting a claim takes the document out of public
+search **before** the claimant has proved anything, because proving takes several
+requests (read the OCR fields, then submit a selfie) and the document must not
+stay claimable by someone else while they run. Approval by the finder does not
+release the record either: the claim parks at ``AWAITING_PAYMENT`` until the
+payment webhook confirms the fee, and because full access is keyed on
+CLAIMED/COMPLETED that withholds the details automatically.
+
+So the lock and the proof are separate gates, in that order:
+
+* ``POST /{id}/start-claim`` — takes the lock. No proof required. Atomic.
+* ``POST /{id}/verify-identity`` / ``verify-face`` — the proof, done under lock.
+* ``POST /{id}/claim`` — requires proof; sends the claim to the finder.
 
 A seeker can prove ownership three ways — typing the full ID number, uploading
 their own photo of the document, or passing a selfie check against the face on
-the posted photo. Any one of them is enough; the finder still decides.
+the posted photo. Any one is enough; the finder still decides. ``/claim`` also
+accepts a claimant who never called ``start-claim`` and takes the lock for them
+in the same request, so the one-step flow still works.
 """
 from __future__ import annotations
 
@@ -18,7 +31,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import face
+from app import claims, face
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user, to_owner, to_preview
@@ -38,6 +51,7 @@ from app.notifications import notify
 from app.schemas import (
     ClaimDecision,
     ClaimRequest,
+    ClaimStartOut,
     FaceVerificationOut,
     IdentityVerificationOut,
     MatchOut,
@@ -54,6 +68,17 @@ router = APIRouter(prefix="/api/matches", tags=["matches"])
 
 # Statuses at which the seeker has earned the unredacted record.
 FULL_ACCESS_STATUSES = (MatchStatus.CLAIMED, MatchStatus.COMPLETED)
+
+# Statuses at which the claimant may still submit proof. CLAIM_PENDING is the
+# normal case — they hold the lock and are working through the steps. MATCHED and
+# REJECTED are kept so a seeker can verify before locking anything, which is how
+# the flow worked before the lock existed and what several tests exercise.
+PROVABLE_STATUSES = (
+    MatchStatus.MATCHED,
+    MatchStatus.CLAIM_PENDING,
+    MatchStatus.REJECTED,
+    MatchStatus.EXPIRED,
+)
 
 
 def _with_document(match: Match, found: FoundId) -> MatchWithPreview:
@@ -75,11 +100,45 @@ async def _load_match(db: AsyncSession, match_id: uuid.UUID) -> tuple[Match, Fou
     return match, found
 
 
+async def _own_match(
+    db: AsyncSession, match_id: uuid.UUID, user: User
+) -> tuple[Match, FoundId]:
+    """Load a match the caller is the seeker on.
+
+    A match belonging to someone else returns 404, not 403: confirming that a
+    given match id exists would leak that *some* document is under claim, which
+    is exactly what the search-hiding rule is there to prevent.
+    """
+    match, found = await _load_match(db, match_id)
+    if match.seeker_user_id != user.id:
+        raise HTTPException(status_code=404, detail="Match does not exist")
+    return match, found
+
+
+def _next_step(match: Match, found: FoundId) -> str:
+    """The one thing the claimant should do next, in their words."""
+    if match.verification_status == VerificationStatus.VERIFIED:
+        return "submit_claim"
+    if match.face_verification_status == FaceVerificationStatus.VERIFIED:
+        return "submit_claim"
+    if found.face_embedding and match.face_attempts < settings.face_max_attempts:
+        return "selfie"
+    return "id_number_or_document"
+
+
 @router.get("/mine", response_model=list[MatchWithPreview])
 async def list_my_matches(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> list[MatchWithPreview]:
-    """Matches where the caller is the seeker, with redacted previews."""
+    """Matches where the caller is the seeker, with redacted previews.
+
+    Deliberately *not* filtered by document visibility. A claimant who holds the
+    lock must keep seeing their own document to finish the claim — §5. Public
+    search is where the document disappears; the claimant's own workspace is not.
+    """
+    # Sweep first so a claimant who let the clock run out sees the truth here
+    # rather than a countdown that already ended.
+    await claims.expire_stale_claims(db)
     result = await db.execute(
         select(Match, FoundId)
         .join(FoundId, FoundId.id == Match.found_id_id)
@@ -110,6 +169,104 @@ async def list_incoming_claims(
     ]
 
 
+@router.post("/{match_id}/start-claim", response_model=ClaimStartOut)
+async def start_claim(
+    match_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ClaimStartOut:
+    """Take the exclusive claim lock, then begin proving ownership.
+
+    This is the step that removes the document from public search. It requires no
+    proof at all, on purpose: the proof steps are separate requests, and leaving
+    the document claimable while they run is precisely the hole this closes. What
+    the lock buys is time to prove, not the document.
+
+    Idempotent for the holder — calling it twice returns the same lock rather
+    than erroring, because a refreshed browser should not look like a conflict.
+    """
+    # Expire abandoned locks before testing availability, so a document held by
+    # someone who walked away is claimable now rather than after some sweep.
+    await claims.expire_stale_claims(db)
+
+    match, found = await _own_match(db, match_id, user)
+
+    if match.status in claims.LOCK_HOLDING_MATCH_STATUSES:
+        if match.status != MatchStatus.CLAIM_PENDING:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This claim has already moved past its start (status '{match.status}')",
+            )
+        # Already ours. Report the existing lock unchanged.
+        return ClaimStartOut(
+            match=MatchOut.model_validate(match),
+            document=to_preview(found),
+            expires_at=claims.claim_deadline(match.claim_started_at or match.created_at),
+            verification_required=True,
+            next_step=_next_step(match, found),
+        )
+
+    if match.status not in claims.STARTABLE_MATCH_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A claim cannot be started from status '{match.status}'",
+        )
+
+    outcome = await claims.acquire(db, match=match, found=found)
+    if not outcome.acquired:
+        # 409, not 403: the claimant is entitled to try, they just lost the race.
+        raise HTTPException(status_code=409, detail=outcome.reason)
+
+    match.status = MatchStatus.CLAIM_PENDING
+    match.claim_started_at = utcnow()
+    match.claim_expired_at = None
+    await db.commit()
+    await db.refresh(match)
+
+    return ClaimStartOut(
+        match=MatchOut.model_validate(match),
+        document=to_preview(found),
+        expires_at=claims.claim_deadline(match.claim_started_at),
+        verification_required=True,
+        next_step=_next_step(match, found),
+    )
+
+
+@router.post("/{match_id}/abandon", response_model=MatchOut)
+async def abandon_claim(
+    match_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MatchOut:
+    """Give up a claim and return the document to public search immediately.
+
+    Without this, a seeker who realises the document is not theirs has no way to
+    release it and it sits locked until the timeout — which punishes everyone
+    else for their honesty.
+
+    Only a claim still at ``CLAIM_PENDING`` can be abandoned. Once the finder has
+    been asked to decide, withdrawing is the finder's call, not a silent release.
+    """
+    match, found = await _own_match(db, match_id, user)
+
+    if match.status != MatchStatus.CLAIM_PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Only a claim in progress can be abandoned (status '{match.status}')",
+        )
+
+    match.status = MatchStatus.EXPIRED
+    match.claim_expired_at = utcnow()
+    # The claimant withdrew; nothing here needs a human. Clear any flag so the
+    # admin queue is not padded with resolved abandonments.
+    match.flagged_for_review = False
+    match.flag_reason = None
+    await claims.release(db, found=found, to_status=FoundIdStatus.POSTED)
+    await db.commit()
+    await db.refresh(match)
+    return MatchOut.model_validate(match)
+
+
 @router.post("/{match_id}/claim", response_model=MatchOut)
 async def request_claim(
     match_id: uuid.UUID,
@@ -117,33 +274,46 @@ async def request_claim(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> MatchOut:
-    """Request a claim, proving ownership with the full ID number or document upload.
+    """Submit the claim to the finder. Proof of ownership is required here.
 
-    The seeker can prove ownership in two ways:
-    1. Type the full ID number (the preview only shows the last two characters).
-    2. Upload their own photo of the document (see ``POST /{id}/verify-identity``),
-       pass the check, and submit a claim without the typed number.
+    Three proofs, any one sufficient:
+
+    1. Type the full ID number (the preview shows only the last two characters).
+    2. Pass the document-image check (``POST /{id}/verify-identity``).
+    3. Pass the selfie check against the face on the posted photo
+       (``POST /{id}/verify-face``).
+
+    This is the gate §24 describes: no proof, no claim, decided server-side from
+    stored verification state. A client that sets its own "verified" flag changes
+    nothing here — the branch below reads the database.
+
+    If the caller never called ``start-claim``, the lock is taken atomically in
+    this request, so the single-step flow (search, then claim with the ID number)
+    still works and still cannot double-lock a document.
     """
-    match, found = await _load_match(db, match_id)
-    if match.seeker_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Match does not exist")
+    await claims.expire_stale_claims(db)
 
-    if match.status not in (MatchStatus.MATCHED, MatchStatus.REJECTED):
+    match, found = await _own_match(db, match_id, user)
+
+    already_holding = match.status == MatchStatus.CLAIM_PENDING
+    if not already_holding and match.status not in claims.STARTABLE_MATCH_STATUSES:
         raise HTTPException(
             status_code=409, detail=f"Claim cannot be started from status '{match.status}'"
         )
 
-    # Any one of the three proofs is enough.
+    # Proof first, lock second. Checking proof before taking the lock means a
+    # claimant who cannot prove anything never removes the document from search
+    # — otherwise a stranger could park someone's ID out of reach by guessing.
     if payload.id_number:
         if normalize_id_number(payload.id_number) != found.id_number_normalized:
             raise HTTPException(
                 status_code=403, detail="The ID number does not match this document"
             )
-        match.verification_method = VerificationMethod.ID_NUMBER_TYPED
+        method = VerificationMethod.ID_NUMBER_TYPED
     elif match.verification_status == VerificationStatus.VERIFIED:
-        match.verification_method = VerificationMethod.DOCUMENT_IMAGE
+        method = VerificationMethod.DOCUMENT_IMAGE
     elif match.face_verification_status == FaceVerificationStatus.VERIFIED:
-        match.verification_method = VerificationMethod.FACE_SELFIE
+        method = VerificationMethod.FACE_SELFIE
     else:
         raise HTTPException(
             status_code=403,
@@ -154,8 +324,18 @@ async def request_claim(
             ),
         )
 
+    if not already_holding:
+        outcome = await claims.acquire(db, match=match, found=found)
+        if not outcome.acquired:
+            raise HTTPException(status_code=409, detail=outcome.reason)
+        match.claim_started_at = utcnow()
+        match.claim_expired_at = None
+
+    match.verification_method = method
     match.status = MatchStatus.CLAIM_REQUESTED
     match.claim_requested_at = utcnow()
+    # The document is already at CLAIM_REQUESTED from the lock; assert it anyway
+    # so the one-step path cannot depend on acquire()'s choice of status.
     found.status = FoundIdStatus.CLAIM_REQUESTED
 
     finder = await db.get(User, found.finder_user_id)
@@ -204,11 +384,9 @@ async def verify_identity(
     Attempts are capped: without a limit, a claimant could feed in image after
     image until OCR happened to misread one into a pass.
     """
-    match, found = await _load_match(db, match_id)
-    if match.seeker_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Match does not exist")
+    match, found = await _own_match(db, match_id, user)
 
-    if match.status not in (MatchStatus.MATCHED, MatchStatus.REJECTED):
+    if match.status not in PROVABLE_STATUSES:
         raise HTTPException(
             status_code=409,
             detail=f"Verification does not apply at status '{match.status}'",
@@ -283,18 +461,22 @@ async def verify_face(
 ) -> FaceVerificationOut:
     """Verify the seeker is the person pictured on the posted document.
 
+    The comparison happens here, on the server, against an embedding derived from
+    the posted document at upload time. The client sends an image and receives a
+    verdict; it has no say in the outcome and cannot assert one.
+
     The selfie is decoded in memory, reduced to an embedding for comparison, and
     dropped. It is never written to disk, and the selfie's own embedding is never
     stored — only the verdict survives the request.
 
     A failure flags the match for manual review rather than silently ending the
-    claim: a false rejection should reach a human, not a dead end.
+    claim: a false rejection should reach a human, not a dead end. It also does
+    **not** release the lock. A document whose claim just failed suspiciously is
+    the last thing that should be handed straight to the next claimant.
     """
-    match, found = await _load_match(db, match_id)
-    if match.seeker_user_id != user.id:
-        raise HTTPException(status_code=404, detail="Match does not exist")
+    match, found = await _own_match(db, match_id, user)
 
-    if match.status not in (MatchStatus.MATCHED, MatchStatus.REJECTED):
+    if match.status not in PROVABLE_STATUSES:
         raise HTTPException(
             status_code=409,
             detail=f"Face verification does not apply at status '{match.status}'",
@@ -304,6 +486,16 @@ async def verify_face(
         raise HTTPException(status_code=409, detail="This claim is already verified")
 
     if match.face_attempts >= settings.face_max_attempts:
+        # Record the terminal state so the admin queue can tell "still trying"
+        # from "out of attempts" without recomputing the cap.
+        if match.face_verification_status != FaceVerificationStatus.ATTEMPTS_EXHAUSTED:
+            match.face_verification_status = FaceVerificationStatus.ATTEMPTS_EXHAUSTED
+            match.flagged_for_review = True
+            match.flag_reason = (
+                f"Selfie verification exhausted after {match.face_attempts} "
+                f"failed attempts. Needs a human decision."
+            )
+            await db.commit()
         raise HTTPException(
             status_code=429,
             detail=(
@@ -354,7 +546,10 @@ async def verify_face(
         # More than one face in the selfie is ambiguous, not a failed match, so
         # it costs no attempt — the same treatment a corrupt upload gets above.
         # Comparing against an arbitrary face would let a claimant stand next to
-        # the rightful holder and pass.
+        # the rightful holder and pass. Recorded so the state is observable, but
+        # the claim stays open.
+        match.face_verification_status = FaceVerificationStatus.TOO_MANY_FACES
+        await db.commit()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except face.FaceUnavailableError as exc:  # pragma: no cover - guarded above
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -368,6 +563,14 @@ async def verify_face(
         match.face_verification_status = FaceVerificationStatus.VERIFIED
         match.face_verified_at = utcnow()
         match.verification_method = VerificationMethod.FACE_SELFIE
+    elif match.face_attempts >= settings.face_max_attempts:
+        match.face_verification_status = FaceVerificationStatus.ATTEMPTS_EXHAUSTED
+        match.flagged_for_review = True
+        match.flag_reason = (
+            f"Selfie did not match the photo on the posted document "
+            f"({outcome.detail}). Final attempt {match.face_attempts} of "
+            f"{settings.face_max_attempts}; no attempts remain."
+        )
     else:
         match.face_verification_status = FaceVerificationStatus.FAILED
         match.flagged_for_review = True
@@ -416,7 +619,8 @@ async def decide_claim(
     if payload.approve:
         # Approval does not release the record. The claim parks here until the
         # payment webhook confirms the fee; FULL_ACCESS_STATUSES excludes this
-        # status, so the details stay withheld with no extra check.
+        # status, so the details stay withheld with no extra check. The lock also
+        # stays: AWAITING_PAYMENT is in LOCK_HOLDING_MATCH_STATUSES.
         match.status = MatchStatus.AWAITING_PAYMENT
         found.status = FoundIdStatus.CLAIM_REQUESTED
 
@@ -431,8 +635,9 @@ async def decide_claim(
         kind = "claim_approved"
     else:
         match.status = MatchStatus.REJECTED
-        # Return the document to the pool so other seekers can still find it.
-        found.status = FoundIdStatus.MATCHED
+        # Release the lock: the finder decided this claimant is not the owner, so
+        # the document genuinely belongs back in circulation for other seekers.
+        await claims.release(db, found=found, to_status=FoundIdStatus.MATCHED)
         title = "Your claim was declined"
         body = (
             "The finder declined your claim.\n\n"

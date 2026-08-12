@@ -48,6 +48,18 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("matches", "face_verified_at", "TIMESTAMPTZ"),
     ("matches", "flagged_for_review", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ("matches", "flag_reason", "TEXT"),
+    # Claim lock bookkeeping. Expiry is measured from claim_started_at, so an
+    # existing row that predates this column falls back to created_at rather
+    # than becoming un-expirable — see ``claims.expire_stale_claims``.
+    ("matches", "claim_started_at", "TIMESTAMPTZ"),
+    ("matches", "claim_expired_at", "TIMESTAMPTZ"),
+    # Structured document classification, alongside the free-form document_type
+    # the finder typed. Kept separate so an unrecognised document keeps the
+    # finder's own words instead of being coerced into the vocabulary.
+    ("found_ids", "document_class", "VARCHAR(48)"),
+    ("found_ids", "classification_confidence", "DOUBLE PRECISION"),
+    ("found_ids", "classification_source", "VARCHAR(32)"),
+    ("found_ids", "ocr_fields", "TEXT"),
 ]
 
 

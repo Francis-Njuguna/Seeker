@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    PUBLICLY_SEARCHABLE_FOUND_STATUSES,
     FoundId,
     FoundIdStatus,
     LostAlert,
@@ -26,8 +27,13 @@ from app.models import (
 from app.normalize import normalize_id_number, redact_id_number
 from app.notifications import notify
 
-# Found records in these states are no longer available to new seekers.
-CLOSED_FOUND_STATUSES = {FoundIdStatus.CLAIMED, FoundIdStatus.RETURNED, FoundIdStatus.ARCHIVED}
+# Every discovery query filters on this whitelist from ``models``, which lists
+# the statuses at which a document is public. It replaced a blacklist of closed
+# statuses that omitted CLAIM_REQUESTED, so a document under active claim stayed
+# searchable by anyone — the seeker who started the claim would watch a rival
+# find and claim the same document out from under them. A whitelist fails closed:
+# a status added later is invisible until someone decides to publish it.
+SEARCHABLE = list(PUBLICLY_SEARCHABLE_FOUND_STATUSES)
 
 
 async def find_by_id_number(db: AsyncSession, id_number: str) -> FoundId | None:
@@ -38,7 +44,7 @@ async def find_by_id_number(db: AsyncSession, id_number: str) -> FoundId | None:
     result = await db.execute(
         select(FoundId)
         .where(FoundId.id_number_normalized == normalized)
-        .where(FoundId.status.notin_(list(CLOSED_FOUND_STATUSES)))
+        .where(FoundId.status.in_(SEARCHABLE))
         .order_by(FoundId.created_at.desc())
     )
     return result.scalars().first()
@@ -58,7 +64,7 @@ async def find_by_name(db: AsyncSession, name: str) -> list[FoundId]:
     result = await db.execute(
         select(FoundId)
         .where(FoundId.holder_name_normalized == normalized)
-        .where(FoundId.status.notin_(list(CLOSED_FOUND_STATUSES)))
+        .where(FoundId.status.in_(SEARCHABLE))
         .order_by(FoundId.created_at.desc())
     )
     return list(result.scalars().all())

@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import claims
 from app.database import get_db
 from app.deps import enforce_search_rate_limit, to_preview
 from app.matching import find_by_id_number, find_by_name, get_or_create_match
@@ -28,11 +29,24 @@ async def search(
 
     A hit creates a match record so the seeker can start a claim, and returns
     only the redacted preview — never the underlying fields.
+
+    Documents under an active claim are absent from these results. Both queries
+    filter on ``PUBLICLY_SEARCHABLE_FOUND_STATUSES``, so a claimed document is
+    reported exactly as a document that was never posted: ``found=False``. That
+    is deliberate — a distinct "currently being claimed" reply would tell a
+    stranger the document exists and that someone is mid-claim on it, which is
+    both a privacy leak and an invitation to interfere.
     """
     if not payload.id_number and not payload.name:
         raise HTTPException(
             status_code=400, detail="Provide either an ID number or a name to search"
         )
+
+    # Release locks whose holder walked away before running the query, so an
+    # abandoned claim does not keep a document hidden from the person who is
+    # actually looking for it. Cheap in the common case: the WHERE clause matches
+    # nothing and the sweep commits nothing.
+    await claims.expire_stale_claims(db)
 
     # ID number is the stronger signal, so it wins when both are supplied.
     if payload.id_number:

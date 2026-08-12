@@ -13,7 +13,15 @@ from app import face
 from app.database import get_db
 from app.deps import get_current_user, to_owner, to_preview
 from app.matching import match_new_found_id
-from app.models import FoundId, Match, MatchStatus, User
+from app.models import (
+    LOCK_HOLDING_MATCH_STATUSES,
+    PUBLICLY_SEARCHABLE_FOUND_STATUSES,
+    FoundId,
+    Match,
+    MatchStatus,
+    User,
+    UserRole,
+)
 from app.normalize import normalize_id_number, normalize_name
 from app.ocr import OcrUnavailableError, extract_fields
 from app.schemas import FoundIdCreate, FoundIdOwner, OcrPreviewOut
@@ -209,6 +217,56 @@ async def _viewer_has_full_access(
     return result.scalars().first() is not None
 
 
+async def _viewer_may_see(db: AsyncSession, found: FoundId, user: User) -> bool:
+    """Whether this user is entitled to know the document exists at all.
+
+    Search hiding is worthless if the direct-fetch route stays open: a seeker who
+    searched before a claim started keeps the UUID, and without this check could
+    poll ``GET /api/found-ids/{id}`` and watch the claim progress on someone
+    else's document. §34 requires *every* discovery mechanism to respect the
+    hiding rule, not just ``POST /api/search``.
+
+    Three parties may see a locked document:
+
+    * the finder, who posted it;
+    * the claimant holding the lock, who needs continued access to finish
+      verifying (§5);
+    * an admin, via the separate ``/api/admin`` routes, which do not come here.
+
+    A seeker holding a *stale* match — one created by a search before the claim
+    started — is not among them. Searching is not a claim, and treating any match
+    row as retained access would hand every earlier searcher a live window onto
+    someone else's claim, which is the leak this function exists to close.
+
+    Anyone else gets a 404 — not a 403. "Forbidden" on a specific UUID confirms a
+    document is there, which is the fact being withheld.
+    """
+    if found.status in PUBLICLY_SEARCHABLE_FOUND_STATUSES:
+        return True
+    if found.finder_user_id == user.id:
+        return True
+    if user.role == UserRole.ADMIN:
+        return True
+    # Only the claim in progress keeps access, not any match on the document.
+    result = await db.execute(
+        select(Match.id)
+        .where(Match.found_id_id == found.id)
+        .where(Match.seeker_user_id == user.id)
+        .where(Match.status.in_(list(LOCK_HOLDING_MATCH_STATUSES)))
+    )
+    return result.scalars().first() is not None
+
+
+async def _load_visible(
+    db: AsyncSession, found_id: uuid.UUID, user: User
+) -> FoundId:
+    """Load a document this user is allowed to know about, or 404."""
+    found = await _load_found(db, found_id)
+    if not await _viewer_may_see(db, found, user):
+        raise HTTPException(status_code=404, detail="Found record does not exist")
+    return found
+
+
 @router.get("/{found_id}")
 async def get_found_id(
     found_id: uuid.UUID,
@@ -216,7 +274,7 @@ async def get_found_id(
     db: AsyncSession = Depends(get_db),
 ):
     """Return the full record to those entitled to it, redacted otherwise."""
-    found = await _load_found(db, found_id)
+    found = await _load_visible(db, found_id, user)
     if await _viewer_has_full_access(db, found, user):
         return to_owner(found)
     return to_preview(found)
@@ -228,7 +286,9 @@ async def get_blurred_image(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
-    found = await _load_found(db, found_id)
+    # Same visibility rule as the record itself. A blurred thumbnail is still a
+    # photograph of someone's ID, and reachable-by-UUID is reachable.
+    found = await _load_visible(db, found_id, user)
     if not found.image_blurred_path:
         raise HTTPException(status_code=404, detail="No image on this record")
     return FileResponse(resolve_path(found.image_blurred_path), media_type="image/jpeg")
@@ -241,7 +301,7 @@ async def get_full_image(
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
     """The unblurred photo. Gated on finder ownership or an approved claim."""
-    found = await _load_found(db, found_id)
+    found = await _load_visible(db, found_id, user)
     if not found.image_path:
         raise HTTPException(status_code=404, detail="No image on this record")
     if not await _viewer_has_full_access(db, found, user):

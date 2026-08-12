@@ -84,6 +84,15 @@ class FoundIdPreview(BaseModel):
     status: str
     created_at: datetime
     blurred_image_url: str | None
+    # Whether a face was detected on the posted document and an embedding stored.
+    # A boolean, never the embedding: the client needs to know if the selfie step
+    # is even possible, and nothing more. When false the UI must offer the ID
+    # number or document-upload path instead of a selfie dropzone that can only
+    # ever fail.
+    has_reference_face: bool = False
+    # Structured classification, when the document was recognised. Absent rather
+    # than "unknown" so the UI can distinguish "not classified" from a class.
+    document_class: str | None = None
 
 
 class FoundIdOwner(ORMModel):
@@ -101,6 +110,10 @@ class FoundIdOwner(ORMModel):
     created_at: datetime
     updated_at: datetime
     image_url: str | None = None
+    has_reference_face: bool = False
+    document_class: str | None = None
+    classification_confidence: float | None = None
+    classification_source: str | None = None
 
 
 # --- search -----------------------------------------------------------------
@@ -175,8 +188,25 @@ class MatchOut(ORMModel):
     flagged_for_review: bool
     flag_reason: str | None
     created_at: datetime
+    claim_started_at: datetime | None = None
     claim_requested_at: datetime | None
     claimed_at: datetime | None
+    claim_expired_at: datetime | None = None
+
+
+class ClaimStartOut(BaseModel):
+    """What the claimant gets back after taking the lock.
+
+    ``expires_at`` is server-computed and authoritative. The UI shows a countdown
+    from it, but the countdown is cosmetic — the release happens server-side (see
+    ``claims.expire_stale_claims``) whether or not a browser is open.
+    """
+
+    match: MatchOut
+    document: FoundIdPreview
+    expires_at: datetime
+    verification_required: bool
+    next_step: str
 
 
 class MatchWithPreview(BaseModel):

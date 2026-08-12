@@ -57,6 +57,10 @@ def to_preview(found: FoundId) -> FoundIdPreview:
         blurred_image_url=(
             f"/api/found-ids/{found.id}/image/blurred" if found.image_blurred_path else None
         ),
+        # A boolean derived from the embedding, never the embedding itself. The
+        # client needs this to decide whether to offer the selfie step at all.
+        has_reference_face=bool(found.face_embedding),
+        document_class=found.document_class,
     )
 
 
@@ -68,6 +72,10 @@ def to_owner(found: FoundId) -> FoundIdOwner:
     """
     out = FoundIdOwner.model_validate(found)
     out.image_url = f"/api/found-ids/{found.id}/image" if found.image_path else None
+    # model_validate cannot pick this up: the model attribute is the embedding
+    # itself, and the schema field is a boolean about it. Set explicitly so the
+    # raw bytes have no path into a response.
+    out.has_reference_face = bool(found.face_embedding)
     return out
 
 
