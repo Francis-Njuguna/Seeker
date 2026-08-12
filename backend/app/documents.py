@@ -32,6 +32,7 @@ import enum
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,13 @@ class ExtractedDocument:
 # passport, so the word "PASSPORT" appears on the page either way and a
 # passport-first order would classify every visa as a passport.
 
+# Named separately from the rules table because ``_class_for_mrz`` consults it
+# directly. Reaching into ``_RULES`` by index would silently break the moment a
+# rule is inserted above it.
+_RESIDENCE_PERMIT_PATTERN = re.compile(
+    r"RESIDENCE\s*PERMIT|RESIDENT\s*PERMIT|WORK\s*PERMIT|ALIEN\s*CARD", re.I
+)
+
 _RULES: list[tuple[str, float, re.Pattern[str]]] = [
     (
         DocumentClass.KENYAN_NATIONAL_ID,
@@ -179,7 +187,15 @@ _RULES: list[tuple[str, float, re.Pattern[str]]] = [
     (
         DocumentClass.PASSPORT,
         0.9,
-        re.compile(r"\bPASSPORT\b|\bPASSEPORT\b|^P[<A-Z]{1}[A-Z]{3}", re.I | re.M),
+        # Printed words only. An earlier version also tried to spot an MRZ first
+        # line with ``^P[<A-Z][A-Z]{3}``, which under re.I|re.M matches ordinary
+        # English words: "PLACE OF ISSUE" on a Kenyan ID scored as a passport
+        # (P + L + ACE) and dragged a certain classification down to a coin flip.
+        # The heuristic was redundant anyway — ``parse_mrz`` runs before this
+        # table and settles the question from the document code when a real zone
+        # is present. A zone too garbled to validate is not evidence worth acting
+        # on, so there is nothing left for a loose pattern to contribute.
+        re.compile(r"\bPASSPORT\b|\bPASSEPORT\b", re.I),
     ),
     (
         DocumentClass.STUDENT_ID,
@@ -203,7 +219,7 @@ _RULES: list[tuple[str, float, re.Pattern[str]]] = [
     (
         DocumentClass.RESIDENCE_PERMIT,
         0.8,
-        re.compile(r"RESIDENCE\s*PERMIT|RESIDENT\s*PERMIT|WORK\s*PERMIT|ALIEN\s*CARD", re.I),
+        _RESIDENCE_PERMIT_PATTERN,
     ),
     (
         DocumentClass.HEALTH_CARD,
@@ -247,6 +263,35 @@ _FINDER_SYNONYMS: dict[str, str] = {
 }
 
 
+def _class_for_mrz(mrz: Mrz, text: str) -> str:
+    """Classify from the MRZ document code, per ICAO 9303 §4.
+
+    The first character of the code is authoritative and beats any keyword: ``P``
+    is a passport, ``V`` a visa, and ``I``/``A``/``C`` an identity card or
+    residence permit. This is why a visa pasted inside a passport classifies
+    correctly — the page has "PASSPORT" printed on it, but the visa's own zone
+    says ``V``.
+    """
+    code = (mrz.document_code or "").upper()
+    kind = code[:1]
+
+    if kind == "V":
+        return DocumentClass.VISA
+    if kind == "P":
+        return DocumentClass.PASSPORT
+    if kind in ("I", "A", "C"):
+        if mrz.issuing_state.upper() == "KEN":
+            return DocumentClass.KENYAN_NATIONAL_ID
+        if _RESIDENCE_PERMIT_PATTERN.search(text):
+            return DocumentClass.RESIDENCE_PERMIT
+        return DocumentClass.NATIONAL_ID
+
+    # A valid zone in a code we do not recognise. It is certainly a travel
+    # document, so OTHER rather than UNKNOWN — we looked, and it is something
+    # else. Guessing PASSPORT here would be inventing a fact.
+    return DocumentClass.OTHER
+
+
 def classify(text: str) -> Classification:
     """Classify a document from its OCR text.
 
@@ -256,6 +301,24 @@ def classify(text: str) -> Classification:
     """
     if not text or not text.strip():
         return Classification(DocumentClass.UNKNOWN, 0.0, ["no text recognised"])
+
+    # The MRZ is checked first, and outranks every keyword rule. A zone whose
+    # check digits validate is the strongest evidence any of this has access to:
+    # it survives glare, a torn corner, and a language we have no keywords for.
+    # It is deliberately consulted *before* the "no rule matched" bail-out — a
+    # TD1 identity card carries no printed word we recognise, so keyword-first
+    # ordering would return UNKNOWN while holding a validated MRZ in hand.
+    mrz = parse_mrz(text)
+    if mrz is not None:
+        return Classification(
+            _class_for_mrz(mrz, text),
+            0.98,
+            [
+                f"{mrz.format} machine-readable zone parsed; "
+                f"check digits validated: "
+                f"{', '.join(k for k, ok in mrz.checks_passed.items() if ok) or 'none'}"
+            ],
+        )
 
     hits: list[tuple[str, float, str]] = []
     for doc_class, weight, pattern in _RULES:
@@ -273,17 +336,6 @@ def classify(text: str) -> Classification:
     if not hits:
         return Classification(
             DocumentClass.UNKNOWN, 0.0, ["no classification rule matched"]
-        )
-
-    # A passport with a valid MRZ is not in doubt, whatever else is printed on it.
-    if parse_mrz(text) is not None:
-        mrz_class = (
-            DocumentClass.VISA
-            if any(h[0] == DocumentClass.VISA for h in hits)
-            else DocumentClass.PASSPORT
-        )
-        return Classification(
-            mrz_class, 0.98, ["machine-readable zone parsed and checksums validated"]
         )
 
     hits.sort(key=lambda h: h[1], reverse=True)
@@ -356,19 +408,54 @@ def _checksum_ok(payload: str, digit: str) -> bool:
     return mrz_check_digit(payload) == int(digit)
 
 
-def _mrz_date(raw: str) -> str | None:
-    """YYMMDD to ISO, or None.
+def _mrz_date(raw: str, *, kind: str) -> str | None:
+    """YYMMDD to a full ISO date, or None.
 
-    The century is inferred from the field's meaning, not guessed: a date of
-    birth cannot be in the future, and a passport expiry is not fifty years past.
-    Where inference would be a coin flip, this returns None rather than picking.
+    The MRZ gives two year digits, so the century has to be resolved. It is
+    resolved from the *meaning* of the field rather than guessed, using the
+    windowing rule ICAO 9303 assumes:
+
+    * a date of birth cannot be in the future, so ``yy`` above the current
+      2-digit year belongs to the 1900s;
+    * an expiry (or issue) date on a document in circulation is near the present,
+      so it belongs to the 2000s.
+
+    ``kind`` is required rather than defaulted. A default would silently pick a
+    century for whichever caller forgot to pass one, and being wrong by a hundred
+    years on someone's date of birth is exactly the kind of invented data this
+    module refuses to produce.
     """
     if not re.fullmatch(r"\d{6}", raw):
         return None
-    year, month, day = int(raw[0:2]), int(raw[2:4]), int(raw[4:6])
+    yy, month, day = int(raw[0:2]), int(raw[2:4]), int(raw[4:6])
     if not (1 <= month <= 12 and 1 <= day <= 31):
         return None
-    return f"{year:02d}-{month:02d}-{day:02d}"  # caller resolves the century
+
+    current_yy = _reference_year() % 100
+    if kind == "birth":
+        century = 1900 if yy > current_yy else 2000
+    elif kind == "expiry":
+        century = 2000
+    else:  # pragma: no cover - guarded by the callers below
+        raise ValueError(f"unknown date kind {kind!r}")
+
+    year = century + yy
+    # Reject a date the calendar does not have (31 February). Only real dates.
+    try:
+        date(year, month, day)
+    except ValueError:
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _reference_year() -> int:
+    """Today's year, isolated so tests can pin it.
+
+    Century resolution depends on "now", which makes any test asserting a
+    resolved year quietly time-dependent. One seam here is cheaper than a
+    frozen-clock dependency across the suite.
+    """
+    return date.today().year
 
 
 def _mrz_names(field_value: str) -> tuple[str | None, str | None]:
@@ -451,9 +538,13 @@ def _parse_td3(line1: str, line2: str) -> Mrz | None:
         given_names=given,
         document_number=document_number,
         nationality=line2[10:13].replace("<", ""),
-        date_of_birth=_mrz_date(line2[13:19]) if checks["date_of_birth"] else None,
+        date_of_birth=(
+            _mrz_date(line2[13:19], kind="birth") if checks["date_of_birth"] else None
+        ),
         sex=line2[20] if line2[20] in ("M", "F") else None,
-        expiry_date=_mrz_date(line2[21:27]) if checks["expiry_date"] else None,
+        expiry_date=(
+            _mrz_date(line2[21:27], kind="expiry") if checks["expiry_date"] else None
+        ),
         format="TD3",
         checks_passed=checks,
     )
@@ -486,9 +577,13 @@ def _parse_td1(line1: str, line2: str, line3: str) -> Mrz | None:
         given_names=given,
         document_number=document_number,
         nationality=line2[15:18].replace("<", ""),
-        date_of_birth=_mrz_date(line2[0:6]) if checks["date_of_birth"] else None,
+        date_of_birth=(
+            _mrz_date(line2[0:6], kind="birth") if checks["date_of_birth"] else None
+        ),
         sex=line2[7] if line2[7] in ("M", "F") else None,
-        expiry_date=_mrz_date(line2[8:14]) if checks["expiry_date"] else None,
+        expiry_date=(
+            _mrz_date(line2[8:14], kind="expiry") if checks["expiry_date"] else None
+        ),
         format="TD1",
         checks_passed=checks,
     )
