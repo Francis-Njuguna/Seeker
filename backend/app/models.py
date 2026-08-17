@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -137,6 +139,7 @@ class VerificationStatus(enum.StrEnum):
 
     UNVERIFIED = "unverified"
     VERIFIED = "verified"
+    INCONCLUSIVE = "inconclusive"
     FAILED = "failed"
 
 
@@ -144,6 +147,8 @@ class VerificationMethod(enum.StrEnum):
     ID_NUMBER_TYPED = "id_number_typed"
     DOCUMENT_IMAGE = "document_image"
     FACE_SELFIE = "face_selfie"
+    DOCUMENT_AND_FACE = "document_and_face"
+    MANUAL_FALLBACK = "manual_fallback"
 
 
 class FaceVerificationStatus(enum.StrEnum):
@@ -184,6 +189,29 @@ class TransactionStatus(enum.StrEnum):
     FAILED = "failed"
 
 
+class DeliveryMethod(enum.StrEnum):
+    COURIER = "courier"
+    MEETUP = "meetup"
+
+
+class DeliveryStatus(enum.StrEnum):
+    DRAFT = "draft"
+    QUOTED = "quoted"
+    AWAITING_PAYMENT = "awaiting_payment"
+    READY_FOR_HANDOVER = "ready_for_handover"
+    IN_TRANSIT = "in_transit"
+    DELIVERED = "delivered"
+    DISPUTED = "disputed"
+    CANCELLED = "cancelled"
+
+
+class WithdrawalStatus(enum.StrEnum):
+    OTP_PENDING = "otp_pending"
+    PROCESSING = "processing"
+    PAID = "paid"
+    FAILED = "failed"
+
+
 UUIDCol = PgUUID(as_uuid=True)
 TS = DateTime(timezone=True)
 
@@ -195,6 +223,11 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(120))
+    phone_number: Mapped[str | None] = mapped_column(
+        String(20), unique=True, index=True, nullable=True
+    )
+    phone_verified_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    preferred_language: Mapped[str] = mapped_column(String(8), default="en")
     role: Mapped[str] = mapped_column(String(32), default=UserRole.SEEKER, index=True)
     created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
 
@@ -217,6 +250,7 @@ class FoundId(Base):
     holder_name_normalized: Mapped[str] = mapped_column(String(255), index=True)
     id_number: Mapped[str] = mapped_column(String(128))
     id_number_normalized: Mapped[str] = mapped_column(String(128), index=True)
+    holder_date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Structured classification from the controlled vocabulary in ``documents.py``,
     # kept alongside ``document_type`` rather than replacing it. The finder types
@@ -250,15 +284,24 @@ class FoundId(Base):
     # the photo cannot be reconstructed from it.
     face_embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     face_embedding_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Records only whether the uploaded image has one usable portrait. The
+    # biometric embedding is computed transiently during a consented claim check.
+    reference_face_detected: Mapped[bool] = mapped_column(Boolean, default=False)
 
     found_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     found_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pickup_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pickup_area: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     status: Mapped[str] = mapped_column(
         String(32), default=FoundIdStatus.POSTED, index=True
     )
     created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(TS, default=utcnow, onupdate=utcnow)
+    images_purged_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    police_transfer_due_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    police_transferred_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    police_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     finder: Mapped[User] = relationship(back_populates="found_ids")
     matches: Mapped[list[Match]] = relationship(back_populates="found_id")
@@ -348,6 +391,15 @@ class Match(Base):
     flagged_for_review: Mapped[bool] = mapped_column(default=False, index=True)
     flag_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    admin_review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    finder_approved_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    admin_approved_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    admin_reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    admin_review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fraud_confirmed_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(TS, default=utcnow, onupdate=utcnow)
     # When the claimant took the exclusive lock on the document. Expiry is
@@ -389,6 +441,8 @@ class Transaction(Base):
     )
 
     amount: Mapped[int] = mapped_column()
+    recovery_fee: Mapped[int] = mapped_column(default=20000)
+    delivery_fee: Mapped[int] = mapped_column(default=0)
     platform_share: Mapped[int] = mapped_column()
     finder_share: Mapped[int] = mapped_column()
     currency: Mapped[str] = mapped_column(String(3), default="KES")
@@ -439,6 +493,83 @@ class Earning(Base):
     currency: Mapped[str] = mapped_column(String(3), default="KES")
 
     created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+
+
+class OtpChallenge(Base):
+    """Short-lived OTP challenge. Only a hash of the code is stored."""
+
+    __tablename__ = "otp_challenges"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDCol, primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    phone_number: Mapped[str] = mapped_column(String(20), index=True)
+    purpose: Mapped[str] = mapped_column(String(32), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(default=0)
+    expires_at: Mapped[datetime] = mapped_column(TS)
+    consumed_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+
+
+class DeliveryOrder(Base):
+    __tablename__ = "delivery_orders"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDCol, primary_key=True, default=_uuid)
+    match_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("matches.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    method: Mapped[str] = mapped_column(String(24))
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pickup_address: Mapped[str] = mapped_column(Text)
+    destination_address: Mapped[str] = mapped_column(Text)
+    suggested_public_location: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fee: Mapped[int] = mapped_column(default=0)
+    currency: Mapped[str] = mapped_column(String(3), default="KES")
+    status: Mapped[str] = mapped_column(String(32), default=DeliveryStatus.DRAFT, index=True)
+    tracking_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    handover_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    handover_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    handover_code_created_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    dispatched_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(TS, default=utcnow, onupdate=utcnow)
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDCol, primary_key=True, default=_uuid)
+    match_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("matches.id", ondelete="CASCADE"), index=True
+    )
+    sender_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+    read_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+
+
+class Withdrawal(Base):
+    __tablename__ = "withdrawals"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUIDCol, primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    phone_number: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[int] = mapped_column()
+    currency: Mapped[str] = mapped_column(String(3), default="KES")
+    status: Mapped[str] = mapped_column(
+        String(32), default=WithdrawalStatus.OTP_PENDING, index=True
+    )
+    provider_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
 
 
 class Notification(Base):

@@ -48,6 +48,7 @@ class VerificationOutcome:
     document_type: str | None
     id_number_matched: bool
     name_matched: bool
+    readable: bool
 
 
 def _name_tokens_match(extracted: str, expected: str) -> bool:
@@ -83,6 +84,7 @@ def compare_against_record(
 
     extracted_name = fields.get("holder_name") or ""
     name_matched = _name_tokens_match(extracted_name, expected_holder_name)
+    readable = bool(extracted_id or extracted_name)
 
     score = (ID_NUMBER_WEIGHT if id_matched else 0.0) + (
         NAME_WEIGHT if name_matched else 0.0
@@ -115,6 +117,7 @@ def compare_against_record(
         document_type=fields.get("document_type"),
         id_number_matched=id_matched,
         name_matched=name_matched,
+        readable=readable,
     )
 
 

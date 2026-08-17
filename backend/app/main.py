@@ -1,24 +1,30 @@
 """FastAPI application entrypoint."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.database import Base, engine
+from app.database import Base, SessionLocal, engine
+from app.retention import run_retention_sweep
 from app.routers import (
     admin,
     auth,
+    deliveries,
     earnings,
     found_ids,
     lost_alerts,
     matches,
+    messages,
     notifications,
     payments,
     search,
+    wallet,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +42,9 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("matches", "verification_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("matches", "verified_at", "TIMESTAMPTZ"),
     ("users", "role", "VARCHAR(32) NOT NULL DEFAULT 'seeker'"),
+    ("users", "phone_number", "VARCHAR(20)"),
+    ("users", "phone_verified_at", "TIMESTAMPTZ"),
+    ("users", "preferred_language", "VARCHAR(8) NOT NULL DEFAULT 'en'"),
     ("found_ids", "face_embedding", "BYTEA"),
     ("found_ids", "face_embedding_model", "VARCHAR(64)"),
     (
@@ -60,6 +69,22 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("found_ids", "classification_confidence", "DOUBLE PRECISION"),
     ("found_ids", "classification_source", "VARCHAR(32)"),
     ("found_ids", "ocr_fields", "TEXT"),
+    ("found_ids", "holder_date_of_birth", "DATE"),
+    ("found_ids", "reference_face_detected", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("found_ids", "pickup_address", "TEXT"),
+    ("found_ids", "pickup_area", "VARCHAR(255)"),
+    ("found_ids", "images_purged_at", "TIMESTAMPTZ"),
+    ("found_ids", "police_transfer_due_at", "TIMESTAMPTZ"),
+    ("found_ids", "police_transferred_at", "TIMESTAMPTZ"),
+    ("found_ids", "police_reference", "VARCHAR(128)"),
+    ("matches", "admin_review_required", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("matches", "finder_approved_at", "TIMESTAMPTZ"),
+    ("matches", "admin_approved_at", "TIMESTAMPTZ"),
+    ("matches", "admin_reviewed_by", "UUID"),
+    ("matches", "admin_review_note", "TEXT"),
+    ("matches", "fraud_confirmed_at", "TIMESTAMPTZ"),
+    ("transactions", "recovery_fee", "INTEGER NOT NULL DEFAULT 20000"),
+    ("transactions", "delivery_fee", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -74,7 +99,25 @@ async def lifespan(app: FastAPI):
                 text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "{column}" {ddl}')
             )
     logger.info("database schema ready")
+    retention_task = None
+    if os.getenv("SEEKER_TESTING") != "1":
+        async def retention_loop() -> None:
+            while True:
+                try:
+                    async with SessionLocal() as session:
+                        await run_retention_sweep(session)
+                except Exception:  # noqa: BLE001 - keep the service alive and retry
+                    logger.exception("retention sweep failed")
+                await asyncio.sleep(6 * 60 * 60)
+
+        retention_task = asyncio.create_task(retention_loop())
     yield
+    if retention_task is not None:
+        retention_task.cancel()
+        try:
+            await retention_task
+        except asyncio.CancelledError:
+            pass
     await engine.dispose()
 
 
@@ -102,10 +145,13 @@ app.include_router(found_ids.router)
 app.include_router(search.router)
 app.include_router(lost_alerts.router)
 app.include_router(matches.router)
+app.include_router(deliveries.router)
+app.include_router(messages.router)
 app.include_router(notifications.router)
 app.include_router(payments.router)
 app.include_router(admin.router)
 app.include_router(earnings.router)
+app.include_router(wallet.router)
 
 
 @app.get("/api/health", tags=["health"])

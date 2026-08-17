@@ -37,11 +37,12 @@ function greeting(hour) {
 }
 
 export default function DashboardPage() {
-  const { token, user } = useAuth()
+  const { token, user, setWorkspace } = useAuth()
   const [notifications, setNotifications] = useState([])
   const [stats, setStats] = useState({ found: 0, alerts: 0, matches: 0 })
 
   useEffect(() => {
+    setWorkspace('owner')
     if (!token) return
     const headers = authHeaders(token)
     Promise.all([
@@ -137,10 +138,16 @@ export default function DashboardPage() {
                   <time dateTime={n.created_at}>
                     {new Date(n.created_at).toLocaleString()}
                   </time>
+                  <Link
+                    to={['claim_requested', 'claim_paid', 'police_transfer_due'].includes(n.kind) ? '/matches?workspace=finder' : '/matches?workspace=owner'}
+                    className="view-all"
+                  >
+                    Open <Icon.ArrowRight />
+                  </Link>
                 </li>
               ))}
             </ul>
-            <Link to="/matches" className="view-all">
+            <Link to="/matches?workspace=owner" className="view-all">
               View all notifications
               <Icon.ArrowRight />
             </Link>

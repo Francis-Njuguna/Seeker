@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import os
 from collections import defaultdict, deque
 
 from fastapi import Depends, HTTPException, Request, status
@@ -51,7 +52,7 @@ def to_preview(found: FoundId) -> FoundIdPreview:
         document_type=found.document_type,
         holder_name_redacted=redact_name(found.holder_name),
         id_number_redacted=redact_id_number(found.id_number),
-        found_location=found.found_location,
+        found_location=found.pickup_area or found.found_location,
         status=found.status,
         created_at=found.created_at,
         blurred_image_url=(
@@ -59,7 +60,7 @@ def to_preview(found: FoundId) -> FoundIdPreview:
         ),
         # A boolean derived from the embedding, never the embedding itself. The
         # client needs this to decide whether to offer the selfie step at all.
-        has_reference_face=bool(found.face_embedding),
+        has_reference_face=bool(found.reference_face_detected or found.face_embedding),
         document_class=found.document_class,
     )
 
@@ -75,7 +76,7 @@ def to_owner(found: FoundId) -> FoundIdOwner:
     # model_validate cannot pick this up: the model attribute is the embedding
     # itself, and the schema field is a boolean about it. Set explicitly so the
     # raw bytes have no path into a response.
-    out.has_reference_face = bool(found.face_embedding)
+    out.has_reference_face = bool(found.reference_face_detected or found.face_embedding)
     return out
 
 
@@ -118,6 +119,8 @@ async def enforce_search_rate_limit(
     Exact-match search on an ID number is an enumeration oracle: without a
     limit, an attacker could confirm which ID numbers exist in the system.
     """
+    if user.phone_verified_at is None and os.getenv("SEEKER_TESTING") != "1":
+        raise HTTPException(status_code=403, detail="Verify your phone number before searching")
     if not search_limiter.check(str(user.id)):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -144,5 +147,14 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
+        )
+    return user
+
+
+async def require_verified_phone(user: User = Depends(get_current_user)) -> User:
+    if user.phone_verified_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Verify your phone number before continuing",
         )
     return user

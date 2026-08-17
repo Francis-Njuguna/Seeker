@@ -107,7 +107,7 @@ export default function AdminClaims() {
  * Shared by Claims and Flagged: /api/admin/flagged returns the same
  * AdminClaimRow shape, just filtered to flagged_for_review.
  */
-export function ClaimTable({ rows, showFlagReason = false }) {
+export function ClaimTable({ rows, showFlagReason = false, onDecision = null, busy = null }) {
   return (
     <table className="admin-table">
       <thead>
@@ -120,6 +120,7 @@ export function ClaimTable({ rows, showFlagReason = false }) {
           <th>Face check</th>
           <th>Payment</th>
           {showFlagReason && <th>Reason</th>}
+          {onDecision && <th>Decision</th>}
           <th>Created</th>
           <th>Claimed</th>
         </tr>
@@ -150,6 +151,16 @@ export function ClaimTable({ rows, showFlagReason = false }) {
             </td>
             {showFlagReason && (
               <td className="admin-reason">{row.flag_reason || '—'}</td>
+            )}
+            {onDecision && (
+              <td>
+                {row.admin_review_required && row.finder_approved_at && row.status === 'claim_requested' ? (
+                  <div className="button-row admin-decisions">
+                    <button type="button" onClick={() => onDecision(row.match_id, true)} disabled={busy === row.match_id}>Approve</button>
+                    <button type="button" className="danger" onClick={() => onDecision(row.match_id, false)} disabled={busy === row.match_id}>Reject</button>
+                  </div>
+                ) : <span className="muted">Waiting for finder</span>}
+              </td>
             )}
             <td>{formatDateTime(row.created_at)}</td>
             <td>{formatDateTime(row.claimed_at)}</td>

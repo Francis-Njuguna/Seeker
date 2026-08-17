@@ -8,22 +8,27 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import require_admin
+from app import claims
 from app.models import (
     FoundId,
+    FoundIdStatus,
     LostAlert,
     Match,
     MatchStatus,
     Transaction,
     TransactionStatus,
     User,
+    utcnow,
 )
+from app.notifications import notify
+from app.schemas import AdminReviewDecision, MatchOut
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -80,6 +85,8 @@ class AdminClaimRow(BaseModel):
     created_at: str
     claimed_at: str | None
     payment_status: str | None
+    admin_review_required: bool
+    finder_approved_at: str | None
 
 
 async def _count(db: AsyncSession, model) -> int:
@@ -254,6 +261,8 @@ async def _claim_rows(
             created_at=match.created_at.isoformat(),
             claimed_at=match.claimed_at.isoformat() if match.claimed_at else None,
             payment_status=payment_status,
+            admin_review_required=match.admin_review_required,
+            finder_approved_at=(match.finder_approved_at.isoformat() if match.finder_approved_at else None),
         )
         for match, found, seeker_email, finder_email, payment_status in result.all()
     ]
@@ -273,3 +282,50 @@ async def list_flagged(
 ) -> list[AdminClaimRow]:
     """The manual-review queue: claims a failed face check flagged for a human."""
     return await _claim_rows(db, flagged_only=True)
+
+
+@router.post("/claims/{match_id}/decision", response_model=MatchOut)
+async def review_claim(
+    match_id: uuid.UUID,
+    payload: AdminReviewDecision,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> MatchOut:
+    match = await db.get(Match, match_id)
+    found = await db.get(FoundId, match.found_id_id) if match else None
+    if match is None or found is None:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    if not match.admin_review_required or match.finder_approved_at is None:
+        raise HTTPException(status_code=409, detail="Claim is not ready for admin review")
+    if match.status != MatchStatus.CLAIM_REQUESTED:
+        raise HTTPException(status_code=409, detail="Claim has already been resolved")
+
+    match.admin_reviewed_by = admin.id
+    match.admin_review_note = payload.note
+    seeker = await db.get(User, match.seeker_user_id)
+    if payload.approve:
+        match.admin_approved_at = utcnow()
+        match.flagged_for_review = False
+        match.status = MatchStatus.AWAITING_PAYMENT
+        title = "Admin review approved - payment required"
+        body = "Admin approved the manual review. Choose fulfilment and complete payment."
+        kind = "admin_review_approved"
+    else:
+        match.status = MatchStatus.REJECTED
+        await claims.release(db, found=found, to_status=FoundIdStatus.MATCHED)
+        title = "Admin review declined"
+        body = "Seeker could not approve the ownership evidence. No fraud penalty is applied automatically."
+        kind = "admin_review_rejected"
+    if seeker:
+        await notify(
+            db,
+            user_id=seeker.id,
+            email=seeker.email,
+            kind=kind,
+            title=title,
+            body=body,
+            match_id=match.id,
+        )
+    await db.commit()
+    await db.refresh(match)
+    return MatchOut.model_validate(match)

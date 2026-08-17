@@ -22,11 +22,14 @@ import hashlib
 import hmac
 import logging
 import uuid
+import base64
 from dataclasses import dataclass
+from datetime import datetime
 
 import httpx
 
 from app.config import settings
+from app.otp import normalize_kenyan_phone
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +120,80 @@ async def _loop_initiate(
     )
 
 
+async def _mpesa_initiate(
+    *, match_id: uuid.UUID, amount: int, payer_phone: str | None
+) -> InitiationResult:
+    if not all(
+        (
+            settings.mpesa_consumer_key,
+            settings.mpesa_consumer_secret,
+            settings.mpesa_shortcode,
+            settings.mpesa_passkey,
+        )
+    ):
+        raise PaymentError("M-Pesa provider selected but Daraja credentials are incomplete")
+    if not payer_phone:
+        raise PaymentError("A verified M-Pesa phone number is required")
+
+    phone = normalize_kenyan_phone(payer_phone).removeprefix("+")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    password = base64.b64encode(
+        f"{settings.mpesa_shortcode}{settings.mpesa_passkey}{timestamp}".encode()
+    ).decode()
+    callback = settings.mpesa_callback_url or f"{settings.public_base_url}/api/payments/webhook"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            token_response = await http.get(
+                f"{settings.mpesa_base_url}/oauth/v1/generate?grant_type=client_credentials",
+                auth=(settings.mpesa_consumer_key, settings.mpesa_consumer_secret),
+            )
+            token_response.raise_for_status()
+            access_token = token_response.json()["access_token"]
+            response = await http.post(
+                f"{settings.mpesa_base_url}/mpesa/stkpush/v1/processrequest",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={
+                    "BusinessShortCode": settings.mpesa_shortcode,
+                    "Password": password,
+                    "Timestamp": timestamp,
+                    "TransactionType": "CustomerPayBillOnline",
+                    "Amount": max(1, round(amount / 100)),
+                    "PartyA": phone,
+                    "PartyB": settings.mpesa_shortcode,
+                    "PhoneNumber": phone,
+                    "CallBackURL": callback,
+                    "AccountReference": f"SEEKER-{str(match_id)[:8]}",
+                    "TransactionDesc": "Seeker document recovery",
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        raise PaymentError(f"M-Pesa STK Push failed: {exc}") from exc
+
+    reference = body.get("CheckoutRequestID")
+    if not reference:
+        raise PaymentError(body.get("errorMessage") or "Daraja returned no checkout reference")
+    return InitiationResult(
+        reference=str(reference),
+        checkout_url=None,
+        provider="mpesa",
+        raw_status=str(body.get("ResponseDescription", "initiated")),
+    )
+
+
 async def initiate(
-    *, match_id: uuid.UUID, amount: int, payer_email: str
+    *, match_id: uuid.UUID, amount: int, payer_email: str, payer_phone: str | None = None
 ) -> InitiationResult:
     """Start a payment with the configured provider."""
     if settings.payment_provider == "loop":
         return await _loop_initiate(
             match_id=match_id, amount=amount, payer_email=payer_email
+        )
+    if settings.payment_provider == "mpesa":
+        return await _mpesa_initiate(
+            match_id=match_id, amount=amount, payer_phone=payer_phone
         )
     return _mock_initiate(match_id=match_id, amount=amount)
 

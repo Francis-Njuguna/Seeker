@@ -23,6 +23,15 @@ services:
       DATABASE_URL: postgresql+asyncpg://seeker:seeker@db:5432/seeker
       JWT_SECRET: dev-secret-change-me
       UPLOAD_DIR: /data/uploads
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      OTP_PROVIDER: ${OTP_PROVIDER:-sandbox}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+      MPESA_BASE_URL: ${MPESA_BASE_URL:-https://sandbox.safaricom.co.ke}
+      MPESA_CONSUMER_KEY: ${MPESA_CONSUMER_KEY:-}
+      MPESA_CONSUMER_SECRET: ${MPESA_CONSUMER_SECRET:-}
+      MPESA_SHORTCODE: ${MPESA_SHORTCODE:-}
+      MPESA_PASSKEY: ${MPESA_PASSKEY:-}
+      MPESA_CALLBACK_URL: ${MPESA_CALLBACK_URL:-}
       # SMTP_HOST intentionally unset: emails are logged instead of sent.
     ports:
       - "8000:8000"

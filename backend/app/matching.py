@@ -36,17 +36,20 @@ from app.notifications import notify
 SEARCHABLE = list(PUBLICLY_SEARCHABLE_FOUND_STATUSES)
 
 
-async def find_by_id_number(db: AsyncSession, id_number: str) -> FoundId | None:
+async def find_by_id_number(db: AsyncSession, id_number: str, document_type: str | None = None) -> FoundId | None:
     """Exact lookup on the normalized ID number."""
     normalized = normalize_id_number(id_number)
     if not normalized:
         return None
-    result = await db.execute(
+    stmt = (
         select(FoundId)
         .where(FoundId.id_number_normalized == normalized)
         .where(FoundId.status.in_(SEARCHABLE))
         .order_by(FoundId.created_at.desc())
     )
+    if document_type:
+        stmt = stmt.where(FoundId.document_type == document_type.strip().lower().replace(" ", "_"))
+    result = await db.execute(stmt)
     return result.scalars().first()
 
 
@@ -67,6 +70,24 @@ async def find_by_name(db: AsyncSession, name: str) -> list[FoundId]:
         .where(FoundId.status.in_(SEARCHABLE))
         .order_by(FoundId.created_at.desc())
     )
+    return list(result.scalars().all())
+
+
+async def find_by_name_and_dob(db: AsyncSession, *, name: str, date_of_birth, document_type: str | None = None) -> list[FoundId]:
+    from app.normalize import normalize_name
+    normalized = normalize_name(name)
+    if not normalized or date_of_birth is None:
+        return []
+    stmt = (
+        select(FoundId)
+        .where(FoundId.holder_name_normalized == normalized)
+        .where(FoundId.holder_date_of_birth == date_of_birth)
+        .where(FoundId.status.in_(SEARCHABLE))
+        .order_by(FoundId.created_at.desc())
+    )
+    if document_type:
+        stmt = stmt.where(FoundId.document_type == document_type.strip().lower().replace(" ", "_"))
+    result = await db.execute(stmt)
     return list(result.scalars().all())
 
 

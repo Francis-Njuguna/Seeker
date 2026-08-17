@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import Icon from '../components/Icon.jsx'
+import { authHeaders, useAuth } from '../auth.jsx'
 import { ClaimTable } from './AdminClaims.jsx'
 import { AdminHead, TableScroll, TableState } from './AdminUI.jsx'
 import { useAdminResource } from './api.js'
@@ -12,8 +14,30 @@ import { useAdminResource } from './api.js'
  * and acts on elsewhere, not one they can clear from here.
  */
 export default function AdminFlagged() {
+  const { token } = useAuth()
   const { data, error, loading, reload } = useAdminResource('/api/admin/flagged')
+  const [actionError, setActionError] = useState('')
+  const [busy, setBusy] = useState(null)
   const rows = data || []
+
+  const decide = async (matchId, approve) => {
+    setActionError('')
+    setBusy(matchId)
+    try {
+      const response = await fetch(`/api/admin/claims/${matchId}/decision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({ approve, note: approve ? 'Ownership evidence approved after manual review.' : 'Ownership evidence was insufficient after manual review.' }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(body.detail || 'Review failed')
+      reload()
+    } catch (err) {
+      setActionError(err.message)
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const state = (
     <TableState
@@ -47,8 +71,10 @@ export default function AdminFlagged() {
             </span>
           </div>
 
+          {actionError && <div className="error" role="alert"><Icon.AlertTriangle /><span>{actionError}</span></div>}
+
           <TableScroll>
-            <ClaimTable rows={rows} showFlagReason />
+            <ClaimTable rows={rows} showFlagReason onDecision={decide} busy={busy} />
           </TableScroll>
         </>
       )}

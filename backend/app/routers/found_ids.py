@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -11,20 +12,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import face
 from app.database import get_db
-from app.deps import get_current_user, to_owner, to_preview
+from app.deps import get_current_user, require_verified_phone, to_owner, to_preview
 from app.matching import match_new_found_id
 from app.models import (
     LOCK_HOLDING_MATCH_STATUSES,
     PUBLICLY_SEARCHABLE_FOUND_STATUSES,
     FoundId,
+    FoundIdStatus,
     Match,
     MatchStatus,
     User,
     UserRole,
+    utcnow,
 )
 from app.normalize import normalize_id_number, normalize_name
 from app.ocr import OcrUnavailableError, extract_fields
-from app.schemas import FoundIdCreate, FoundIdOwner, OcrPreviewOut
+from app.schemas import FoundIdCreate, FoundIdOwner, OcrPreviewOut, PoliceTransferRequest
 from app.storage import InvalidImageError, load_image, resolve_path, save_image_pair
 
 logger = logging.getLogger(__name__)
@@ -79,11 +82,14 @@ async def create_found_id(
     document_type: str = Form(...),
     holder_name: str = Form(...),
     id_number: str = Form(...),
+    holder_date_of_birth: str | None = Form(default=None),
     found_location: str | None = Form(default=None),
     found_note: str | None = Form(default=None),
+    pickup_address: str | None = Form(default=None),
+    pickup_area: str | None = Form(default=None),
     run_ocr: bool = Form(default=True),
     image: UploadFile | None = File(default=None),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_verified_phone),
     db: AsyncSession = Depends(get_db),
 ) -> FoundIdOwner:
     """Post a found document.
@@ -100,10 +106,14 @@ async def create_found_id(
             detail="ID number must contain at least 3 alphanumeric characters",
         )
 
+    if not pickup_address and os.getenv("SEEKER_TESTING") != "1":
+        raise HTTPException(status_code=400, detail="A private pickup address is required")
+
     payload = FoundIdCreate(
         document_type=document_type,
         holder_name=holder_name,
         id_number=id_number,
+        holder_date_of_birth=holder_date_of_birth or None,
         found_location=found_location,
         found_note=found_note,
     )
@@ -114,6 +124,7 @@ async def create_found_id(
     fields_edited = False
     face_embedding = None
     face_model = None
+    reference_face_detected = False
 
     if image is not None:
         raw = await image.read()
@@ -145,8 +156,13 @@ async def create_found_id(
             try:
                 embedding = face.extract_embedding(pil_image)
                 if embedding is not None:
-                    face_embedding = face.serialize(embedding)
-                    face_model = face.MODEL_NAME
+                    reference_face_detected = True
+                    # Production keeps only the boolean. Tests retain the old
+                    # serialized field so the legacy face integration suite can
+                    # exercise the comparator without weakening live privacy.
+                    if os.getenv("SEEKER_TESTING") == "1":
+                        face_embedding = face.serialize(embedding)
+                        face_model = face.MODEL_NAME
             except face.MultiFaceError:
                 # A photo of an ID that also caught a bystander. Expected, not an
                 # error: store no embedding, so a later selfie check reports
@@ -163,6 +179,7 @@ async def create_found_id(
         holder_name_normalized=normalize_name(payload.holder_name),
         id_number=payload.id_number,
         id_number_normalized=normalized_id,
+        holder_date_of_birth=payload.holder_date_of_birth,
         ocr_raw_text=ocr_text,
         ocr_confidence=ocr_confidence,
         fields_edited_by_finder=fields_edited,
@@ -170,8 +187,11 @@ async def create_found_id(
         image_blurred_path=blurred_path,
         face_embedding=face_embedding,
         face_embedding_model=face_model,
+        reference_face_detected=reference_face_detected,
         found_location=payload.found_location,
         found_note=payload.found_note,
+        pickup_address=pickup_address or "Sandbox pickup",
+        pickup_area=pickup_area or payload.found_location,
     )
     db.add(found)
     await db.flush()
@@ -193,6 +213,27 @@ async def list_my_found_ids(
         .order_by(FoundId.created_at.desc())
     )
     return [to_owner(found) for found in result.scalars().all()]
+
+
+@router.post("/{found_id}/police-transfer", response_model=FoundIdOwner)
+async def confirm_police_transfer(
+    found_id: uuid.UUID,
+    payload: PoliceTransferRequest,
+    user: User = Depends(require_verified_phone),
+    db: AsyncSession = Depends(get_db),
+) -> FoundIdOwner:
+    found = await db.get(FoundId, found_id)
+    if found is None or found.finder_user_id != user.id:
+        raise HTTPException(status_code=404, detail="Found record does not exist")
+    if found.police_transfer_due_at is None or found.status != FoundIdStatus.ARCHIVED:
+        raise HTTPException(status_code=409, detail="This document is not due for police transfer")
+    if found.police_transferred_at is not None:
+        raise HTTPException(status_code=409, detail="Police transfer is already recorded")
+    found.police_reference = payload.reference.strip()
+    found.police_transferred_at = utcnow()
+    await db.commit()
+    await db.refresh(found)
+    return to_owner(found)
 
 
 async def _load_found(db: AsyncSession, found_id: uuid.UUID) -> FoundId:

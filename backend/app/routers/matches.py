@@ -37,6 +37,8 @@ from app.database import get_db
 from app.deps import get_current_user, to_owner, to_preview
 from app.models import (
     FaceVerificationStatus,
+    DeliveryOrder,
+    DeliveryStatus,
     FoundId,
     FoundIdStatus,
     Match,
@@ -57,7 +59,7 @@ from app.schemas import (
     MatchOut,
     MatchWithPreview,
 )
-from app.storage import InvalidImageError, load_image
+from app.storage import InvalidImageError, load_image, resolve_path
 from app.verification import (
     MAX_ATTEMPTS,
     OcrUnavailableError,
@@ -65,6 +67,11 @@ from app.verification import (
 )
 
 router = APIRouter(prefix="/api/matches", tags=["matches"])
+
+HIGH_RISK_DOCUMENT_TYPES = {
+    "passport", "bank_card", "birth_certificate", "death_certificate",
+    "title_deed", "medical_record",
+}
 
 # Statuses at which the seeker has earned the unredacted record.
 FULL_ACCESS_STATUSES = (MatchStatus.CLAIMED, MatchStatus.COMPLETED)
@@ -121,7 +128,7 @@ def _next_step(match: Match, found: FoundId) -> str:
         return "submit_claim"
     if match.face_verification_status == FaceVerificationStatus.VERIFIED:
         return "submit_claim"
-    if found.face_embedding and match.face_attempts < settings.face_max_attempts:
+    if (found.reference_face_detected or found.face_embedding) and match.face_attempts < settings.face_max_attempts:
         return "selfie"
     return "id_number_or_document"
 
@@ -166,6 +173,27 @@ async def list_incoming_claims(
             match=MatchOut.model_validate(m), preview=to_preview(f), full=to_owner(f)
         )
         for m, f in result.all()
+    ]
+
+
+@router.get("/finder", response_model=list[MatchWithPreview])
+async def list_finder_matches(
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> list[MatchWithPreview]:
+    result = await db.execute(
+        select(Match, FoundId)
+        .join(FoundId, FoundId.id == Match.found_id_id)
+        .where(FoundId.finder_user_id == user.id)
+        .where(Match.status != MatchStatus.MATCHED)
+        .order_by(Match.created_at.desc())
+    )
+    return [
+        MatchWithPreview(
+            match=MatchOut.model_validate(match),
+            preview=to_preview(found),
+            full=to_owner(found),
+        )
+        for match, found in result.all()
     ]
 
 
@@ -304,23 +332,33 @@ async def request_claim(
     # Proof first, lock second. Checking proof before taking the lock means a
     # claimant who cannot prove anything never removes the document from search
     # — otherwise a stranger could park someone's ID out of reach by guessing.
+    typed_number_matches = False
     if payload.id_number:
         if normalize_id_number(payload.id_number) != found.id_number_normalized:
             raise HTTPException(
                 status_code=403, detail="The ID number does not match this document"
             )
-        method = VerificationMethod.ID_NUMBER_TYPED
-    elif match.verification_status == VerificationStatus.VERIFIED:
+        typed_number_matches = True
+
+    document_verified = match.verification_status == VerificationStatus.VERIFIED
+    face_verified = match.face_verification_status == FaceVerificationStatus.VERIFIED
+    has_portrait = bool(found.reference_face_detected or found.face_embedding)
+    standard_verified = document_verified and (face_verified if has_portrait else True)
+    fallback_evidence = typed_number_matches or document_verified or face_verified
+
+    if standard_verified and has_portrait:
+        method = VerificationMethod.DOCUMENT_AND_FACE
+    elif standard_verified:
         method = VerificationMethod.DOCUMENT_IMAGE
-    elif match.face_verification_status == FaceVerificationStatus.VERIFIED:
-        method = VerificationMethod.FACE_SELFIE
+    elif fallback_evidence:
+        method = VerificationMethod.MANUAL_FALLBACK
     else:
         raise HTTPException(
             status_code=403,
             detail=(
-                "You must prove ownership first: supply the full ID number, "
-                "upload your own photo of the document via /verify-identity, "
-                "or pass a selfie check via /verify-face."
+                "Submit ownership evidence first. Portrait documents require a "
+                "matching document copy and selfie; fallback claims require at "
+                "least one check before finder and admin review."
             ),
         )
 
@@ -332,6 +370,14 @@ async def request_claim(
         match.claim_expired_at = None
 
     match.verification_method = method
+    match.admin_review_required = (
+        not standard_verified or found.document_type in HIGH_RISK_DOCUMENT_TYPES
+    )
+    if match.admin_review_required:
+        match.flagged_for_review = True
+        match.flag_reason = match.flag_reason or (
+            "Fallback or high-risk claim requires admin approval after finder review."
+        )
     match.status = MatchStatus.CLAIM_REQUESTED
     match.claim_requested_at = utcnow()
     # The document is already at CLAIM_REQUESTED from the lock; assert it anyway
@@ -347,6 +393,12 @@ async def request_claim(
             ),
             VerificationMethod.FACE_SELFIE: (
                 "passed a selfie check against the photo on the document"
+            ),
+            VerificationMethod.DOCUMENT_AND_FACE: (
+                "passed document-copy and selfie verification"
+            ),
+            VerificationMethod.MANUAL_FALLBACK: (
+                "submitted evidence that requires admin review"
             ),
         }.get(match.verification_method, "verified their identity")
         await notify(
@@ -425,16 +477,21 @@ async def verify_identity(
             status_code=503, detail=f"Verification is unavailable: {exc}"
         ) from exc
 
-    match.verification_attempts += 1
     match.verification_score = outcome.score
     match.verification_detail = outcome.detail
     match.verification_document_type = outcome.document_type
 
     if outcome.passed:
+        match.verification_attempts += 1
         match.verification_status = VerificationStatus.VERIFIED
         match.verification_method = VerificationMethod.DOCUMENT_IMAGE
         match.verified_at = utcnow()
+    elif not outcome.readable:
+        # OCR being unable to read the upload is not a mismatch and must not
+        # consume a claimant's limited verification attempts.
+        match.verification_status = VerificationStatus.INCONCLUSIVE
     else:
+        match.verification_attempts += 1
         match.verification_status = VerificationStatus.FAILED
 
     await db.commit()
@@ -516,7 +573,7 @@ async def verify_face(
             ),
         )
 
-    if not found.face_embedding:
+    if not (found.reference_face_detected or found.face_embedding):
         # The posted photo had no detectable face. The claimant did nothing
         # wrong, so this is recorded distinctly from a failure and costs no
         # attempt — they should be sent down another proof path.
@@ -537,11 +594,20 @@ async def verify_face(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        outcome = face.compare(
-            face.deserialize(found.face_embedding),
-            pil_image,
-            threshold=settings.face_match_threshold,
-        )
+        if found.face_embedding:
+            known_embedding = face.deserialize(found.face_embedding)
+        elif found.image_path:
+            reference = load_image(resolve_path(found.image_path).read_bytes())
+            known_embedding = face.extract_embedding(reference)
+            if known_embedding is None:
+                match.face_verification_status = FaceVerificationStatus.NO_FACE_ON_RECORD
+                await db.commit()
+                raise HTTPException(status_code=422, detail="No face detected on the posted document")
+        else:
+            known_embedding = None
+        if known_embedding is None:
+            raise HTTPException(status_code=422, detail="No face detected on the posted document")
+        outcome = face.compare(known_embedding, pil_image, threshold=settings.face_match_threshold)
     except face.MultiFaceError as exc:
         # More than one face in the selfie is ambiguous, not a failed match, so
         # it costs no attempt — the same treatment a corrupt upload gets above.
@@ -621,7 +687,12 @@ async def decide_claim(
         # payment webhook confirms the fee; FULL_ACCESS_STATUSES excludes this
         # status, so the details stay withheld with no extra check. The lock also
         # stays: AWAITING_PAYMENT is in LOCK_HOLDING_MATCH_STATUSES.
-        match.status = MatchStatus.AWAITING_PAYMENT
+        match.finder_approved_at = utcnow()
+        match.status = (
+            MatchStatus.CLAIM_REQUESTED
+            if match.admin_review_required
+            else MatchStatus.AWAITING_PAYMENT
+        )
         found.status = FoundIdStatus.CLAIM_REQUESTED
 
         amount = settings.payment_amount_minor / 100
@@ -633,6 +704,13 @@ async def decide_claim(
             + (f"Note from the finder: {payload.note}" if payload.note else "")
         )
         kind = "claim_approved"
+        if match.admin_review_required:
+            title = "Finder approved - admin review pending"
+            body = (
+                "The finder approved your fallback or high-risk claim. "
+                "Seeker must review it before payment."
+            )
+            kind = "claim_admin_review"
     else:
         match.status = MatchStatus.REJECTED
         # Release the lock: the finder decided this claimant is not the owner, so
@@ -671,13 +749,15 @@ async def complete_match(
     match, found = await _load_match(db, match_id)
     if user.id not in (match.seeker_user_id, found.finder_user_id):
         raise HTTPException(status_code=404, detail="Match does not exist")
-    if match.status != MatchStatus.CLAIMED:
+    delivery = await db.scalar(
+        select(DeliveryOrder).where(DeliveryOrder.match_id == match.id)
+    )
+    if delivery is None or delivery.status != DeliveryStatus.DELIVERED:
         raise HTTPException(
-            status_code=409, detail="Only a claimed match can be completed"
+            status_code=409,
+            detail="Handover must be confirmed with the receipt code",
         )
-
-    match.status = MatchStatus.COMPLETED
-    found.status = FoundIdStatus.RETURNED
-    await db.commit()
-    await db.refresh(match)
+    # Delivery confirmation owns the state transition and finder earning. This
+    # legacy route remains read-compatible for older clients but cannot bypass
+    # the receipt-code escrow release.
     return MatchOut.model_validate(match)

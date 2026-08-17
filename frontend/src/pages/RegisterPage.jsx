@@ -5,7 +5,9 @@ import { AuthLayout } from '../components/Brand.jsx'
 import Icon from '../components/Icon.jsx'
 
 export default function RegisterPage() {
-  const [form, setForm] = useState({ email: '', password: '', display_name: '' })
+  const [form, setForm] = useState({
+    email: '', password: '', display_name: '', phone_number: '', preferred_language: 'en',
+  })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const { login } = useAuth()
@@ -32,7 +34,7 @@ export default function RegisterPage() {
         )
       }
       login(data.access_token, data.user)
-      navigate('/')
+      navigate('/verify-phone')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -85,6 +87,31 @@ export default function RegisterPage() {
             onChange={update('email')}
             required
           />
+        </div>
+
+        <div className="field">
+          <label htmlFor="phone_number">M-Pesa phone number</label>
+          <input
+            id="phone_number"
+            type="tel"
+            autoComplete="tel"
+            placeholder="0712 345 678"
+            value={form.phone_number}
+            onChange={update('phone_number')}
+            required
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="preferred_language">Language</label>
+          <select
+            id="preferred_language"
+            value={form.preferred_language}
+            onChange={update('preferred_language')}
+          >
+            <option value="en">English</option>
+            <option value="sw">Kiswahili</option>
+          </select>
         </div>
 
         <div className="field">

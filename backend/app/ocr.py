@@ -83,7 +83,7 @@ def preprocess(image: Image.Image) -> Image.Image:
     Tesseract's accuracy falls off sharply below roughly 300 DPI, so small
     crops are enlarged before recognition.
     """
-    gray = ImageOps.grayscale(image)
+    gray = ImageOps.grayscale(ImageOps.exif_transpose(image))
     gray = ImageOps.autocontrast(gray)
     width, height = gray.size
     if max(width, height) < 1000:
@@ -105,7 +105,11 @@ def run_tesseract(image: Image.Image) -> tuple[str, float | None]:
     except Exception as exc:  # pragma: no cover - depends on local binary
         raise OcrUnavailableError(f"tesseract failed: {exc}") from exc
 
-    confidences = [float(c) for c in data.get("conf", []) if str(c) not in ("-1", "")]
+    confidences = [
+        float(confidence)
+        for confidence, token in zip(data.get("conf", []), data.get("text", []))
+        if str(confidence) not in ("-1", "") and str(token).strip()
+    ]
     mean_conf = sum(confidences) / len(confidences) if confidences else None
     return text, mean_conf
 

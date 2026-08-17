@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { useAuth } from './auth.jsx'
 import LoginPage from './pages/LoginPage.jsx'
 import RegisterPage from './pages/RegisterPage.jsx'
+import VerifyPhonePage from './pages/VerifyPhonePage.jsx'
 import DashboardPage from './pages/DashboardPage.jsx'
 import PostFoundPage from './pages/PostFoundPage.jsx'
 import SearchPage from './pages/SearchPage.jsx'
@@ -13,11 +14,14 @@ import AdminOverview from './admin/AdminOverview.jsx'
 import AdminTransactions from './admin/AdminTransactions.jsx'
 import AdminClaims from './admin/AdminClaims.jsx'
 import AdminFlagged from './admin/AdminFlagged.jsx'
+import FinderDashboardPage from './pages/FinderDashboardPage.jsx'
 
-function ProtectedRoute({ children }) {
+function ProtectedRoute({ children, allowUnverified = false }) {
   const { user, loading } = useAuth()
   if (loading) return <div className="loading">Loading...</div>
-  return user ? children : <Navigate to="/login" replace />
+  if (!user) return <Navigate to="/login" replace />
+  if (!allowUnverified && !user.phone_verified_at) return <Navigate to="/verify-phone" replace />
+  return children
 }
 
 export default function App() {
@@ -31,14 +35,17 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/verify-phone" element={<ProtectedRoute allowUnverified><VerifyPhonePage /></ProtectedRoute>} />
         <Route
           path="/"
           element={
             <ProtectedRoute>
-              <DashboardPage />
+              <Navigate to="/owner" replace />
             </ProtectedRoute>
           }
         />
+        <Route path="/owner" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+        <Route path="/finder" element={<ProtectedRoute><FinderDashboardPage /></ProtectedRoute>} />
         <Route
           path="/post-found"
           element={

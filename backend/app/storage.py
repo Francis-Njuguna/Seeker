@@ -55,7 +55,7 @@ def save_image_pair(image: Image.Image) -> tuple[str, str]:
     root = _upload_root()
     key = uuid.uuid4().hex
 
-    rgb = image.convert("RGB")
+    rgb = ImageOps.exif_transpose(image).convert("RGB")
 
     original_name = f"{key}.jpg"
     rgb.save(root / original_name, format="JPEG", quality=88)

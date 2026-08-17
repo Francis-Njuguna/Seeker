@@ -8,6 +8,9 @@ sandbox exercises the identical code path rather than a shortcut around it.
 from __future__ import annotations
 
 import logging
+import os
+import hashlib
+import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,7 +23,8 @@ from app.config import settings
 from app.database import get_db
 from app.deps import ensure_uuid, get_current_user
 from app.models import (
-    Earning,
+    DeliveryOrder,
+    DeliveryStatus,
     FoundId,
     FoundIdStatus,
     Match,
@@ -57,6 +61,8 @@ class InitiateResponse(BaseModel):
     currency: str
     platform_share: int
     finder_share: int
+    recovery_fee: int
+    delivery_fee: int
 
 
 class PaymentStatusResponse(BaseModel):
@@ -109,20 +115,16 @@ async def apply_payment_result(
     if found is not None:
         found.status = FoundIdStatus.CLAIMED
 
-    db.add(
-        Earning(
-            finder_user_id=txn.finder_user_id,
-            transaction_id=txn.id,
-            match_id=txn.match_id,
-            found_id_id=match.found_id_id,
-            amount=txn.finder_share,
-            currency=txn.currency,
-        )
-    )
+    delivery = await db.scalar(select(DeliveryOrder).where(DeliveryOrder.match_id == match.id))
+    if delivery is not None:
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        delivery.handover_code = code
+        delivery.handover_code_hash = hashlib.sha256(code.encode("ascii")).hexdigest()
+        delivery.handover_code_created_at = utcnow()
+        delivery.status = DeliveryStatus.READY_FOR_HANDOVER
 
     seeker = await db.get(User, txn.payer_user_id)
     finder = await db.get(User, txn.finder_user_id)
-    major = txn.finder_share / 100
 
     if seeker is not None:
         await notify(
@@ -133,7 +135,8 @@ async def apply_payment_result(
             title="Payment confirmed",
             body=(
                 "Your payment has been received and your claim is approved. "
-                "The full document details are now visible in your matches."
+                "The delivery receipt code is available in your matches. Share it "
+                "only after you have received the document."
             ),
             match_id=txn.match_id,
         )
@@ -143,10 +146,10 @@ async def apply_payment_result(
             user_id=finder.id,
             email=finder.email,
             kind="claim_paid",
-            title="You earned a reward",
+            title="Payment confirmed - handover required",
             body=(
-                f"A document you posted was claimed and paid for. "
-                f"You earned {major:.2f} {txn.currency}."
+                "The claim payment is confirmed. Arrange delivery, then enter the "
+                "owner's receipt code to release your finder reward."
             ),
             match_id=txn.match_id,
         )
@@ -208,18 +211,41 @@ async def initiate_payment(
             currency=existing.currency,
             platform_share=existing.platform_share,
             finder_share=existing.finder_share,
+            recovery_fee=existing.recovery_fee,
+            delivery_fee=existing.delivery_fee,
         )
 
     found = await db.scalar(select(FoundId).where(FoundId.id == match.found_id_id))
     if found is None:
         raise HTTPException(status_code=500, detail="Found document record missing")
 
-    amount = settings.payment_amount_minor
-    platform_share, finder_share = compute_split(amount)
+    delivery = await db.scalar(select(DeliveryOrder).where(DeliveryOrder.match_id == match.id))
+    if delivery is None:
+        if os.getenv("SEEKER_TESTING") != "1":
+            raise HTTPException(status_code=409, detail="Choose a courier or meetup before payment")
+        delivery = DeliveryOrder(
+            match_id=match.id,
+            method="meetup",
+            pickup_address="Sandbox pickup",
+            destination_address="Sandbox destination",
+            fee=0,
+            currency=settings.payment_currency,
+            status=DeliveryStatus.QUOTED,
+        )
+        db.add(delivery)
+        await db.flush()
+
+    recovery_fee = settings.payment_amount_minor
+    delivery_fee = delivery.fee
+    amount = recovery_fee + delivery_fee
+    platform_share, finder_share = compute_split(recovery_fee)
 
     try:
         result: InitiationResult = await initiate(
-            match_id=match.id, amount=amount, payer_email=user.email
+            match_id=match.id,
+            amount=amount,
+            payer_email=user.email,
+            payer_phone=payload.phone or user.phone_number,
         )
     except Exception as exc:  # noqa: BLE001 - provider outage, not a client error
         logger.exception("payment initiation failed match=%s", match.id)
@@ -232,6 +258,8 @@ async def initiate_payment(
         payer_user_id=user.id,
         finder_user_id=found.finder_user_id,
         amount=amount,
+        recovery_fee=recovery_fee,
+        delivery_fee=delivery_fee,
         platform_share=platform_share,
         finder_share=finder_share,
         currency=settings.payment_currency,
@@ -254,6 +282,8 @@ async def initiate_payment(
         currency=settings.payment_currency,
         platform_share=platform_share,
         finder_share=finder_share,
+        recovery_fee=recovery_fee,
+        delivery_fee=delivery_fee,
     )
 
 
@@ -278,7 +308,13 @@ async def payment_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Malformed payload") from exc
 
-    reference = body.get("reference")
+    stk_callback = body.get("Body", {}).get("stkCallback", {})
+    if stk_callback:
+        reference = stk_callback.get("CheckoutRequestID")
+        raw_status = "paid" if stk_callback.get("ResultCode") == 0 else "failed"
+    else:
+        reference = body.get("reference")
+        raw_status = str(body.get("status", ""))
     if not reference:
         raise HTTPException(status_code=400, detail="Missing reference")
 
@@ -289,7 +325,7 @@ async def payment_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         logger.info("webhook for unknown reference=%s, ignored", reference)
         return {"status": "ignored"}
 
-    return await apply_payment_result(db, txn, str(body.get("status", "")))
+    return await apply_payment_result(db, txn, raw_status)
 
 
 @router.get("/{match_id}", response_model=PaymentStatusResponse)

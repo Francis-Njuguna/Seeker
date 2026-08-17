@@ -95,6 +95,17 @@ def test_unrelated_document_fails() -> None:
     )
     assert not outcome.passed
     assert outcome.score == 0.0
+    assert outcome.readable
+
+
+def test_unreadable_document_is_inconclusive() -> None:
+    outcome = compare_against_record(
+        render_card([]),
+        expected_id_number="AB123456",
+        expected_holder_name="Jane Alice Doe",
+    )
+    assert not outcome.passed
+    assert not outcome.readable
 
 
 def test_student_id_verifies_against_its_own_number() -> None:

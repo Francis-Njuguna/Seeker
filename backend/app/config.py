@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 60 * 12
 
+    # Account verification. The sandbox sender logs a code and can be replaced
+    # with an SMS provider without changing claim or payout logic.
+    otp_ttl_minutes: int = 10
+    otp_max_attempts: int = 5
+    otp_provider: str = "sandbox"
+    sms_api_key: str = ""
+
     # Storage
     upload_dir: str = "/data/uploads"
 
@@ -53,8 +60,8 @@ class Settings(BaseSettings):
     # Kenya's Data Protection Act 2019 s.39 requires personal data not be kept
     # longer than necessary; these encode "necessary" as a number the operator
     # can defend, rather than leaving it to whenever someone remembers.
-    retention_returned_document_days: int = 90
-    retention_unclaimed_document_days: int = 365
+    retention_returned_document_days: int = 30
+    retention_unclaimed_document_days: int = 90
     retention_notification_days: int = 180
     retention_audit_log_days: int = 730
 
@@ -72,6 +79,15 @@ class Settings(BaseSettings):
 
     # Used to build the callback URL handed to the payment provider.
     public_base_url: str = "http://localhost:8000"
+
+    # M-Pesa Daraja. Sandbox and production use the same STK adapter with
+    # different credentials and endpoint base URLs.
+    mpesa_consumer_key: str = ""
+    mpesa_consumer_secret: str = ""
+    mpesa_shortcode: str = ""
+    mpesa_passkey: str = ""
+    mpesa_callback_url: str = ""
+    mpesa_base_url: str = "https://sandbox.safaricom.co.ke"
 
 
 @lru_cache

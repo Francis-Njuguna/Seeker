@@ -5,11 +5,16 @@ import Icon from '../components/Icon.jsx'
 const DOCUMENT_TYPES = [
   'national_id',
   'passport',
-  'driver_license',
+  'driving_licence',
+  'birth_certificate',
+  'alien_card',
+  'refugee_id',
   'residence_permit',
   'student_id',
-  'health_card',
-  'social_security',
+  'staff_id',
+  'health_insurance_card',
+  'bank_card',
+  'professional_licence',
   'other',
 ]
 
@@ -25,7 +30,10 @@ export default function PostFoundPage() {
     document_type: 'national_id',
     holder_name: '',
     id_number: '',
+    holder_date_of_birth: '',
     found_location: '',
+    pickup_area: '',
+    pickup_address: '',
     found_note: '',
   })
   const [error, setError] = useState('')
@@ -260,13 +268,51 @@ export default function PostFoundPage() {
           </div>
 
           <div className="field">
-            <label htmlFor="found_location">Where you found it</label>
+            <label htmlFor="holder_date_of_birth">
+              Date of birth {form.document_type !== 'national_id' && <span className="muted">- when printed</span>}
+            </label>
+            <input
+              id="holder_date_of_birth"
+              type="date"
+              value={form.holder_date_of_birth}
+              onChange={update('holder_date_of_birth')}
+              required={form.document_type === 'national_id'}
+            />
+          </div>
+
+          <div className="field">
+            <label htmlFor="found_location">Where you found it <span className="muted">- optional</span></label>
             <input
               id="found_location"
               value={form.found_location}
               onChange={update('found_location')}
               placeholder="e.g. Central Station, platform 4"
             />
+          </div>
+
+          <div className="field">
+            <label htmlFor="pickup_area">Public pickup area</label>
+            <input
+              id="pickup_area"
+              value={form.pickup_area}
+              onChange={update('pickup_area')}
+              placeholder="e.g. Westlands, Nairobi"
+              required
+            />
+            <span className="hint">Owners see only this approximate area before payment.</span>
+          </div>
+
+          <div className="field">
+            <label htmlFor="pickup_address">Private pickup address</label>
+            <textarea
+              id="pickup_address"
+              value={form.pickup_address}
+              onChange={update('pickup_address')}
+              rows={2}
+              placeholder="Exact building, street, landmark and contact instructions"
+              required
+            />
+            <span className="hint">Used privately to calculate courier options and coordinate handover.</span>
           </div>
 
           <div className="field">

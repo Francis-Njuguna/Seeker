@@ -358,6 +358,168 @@ a:hover {
   white-space: nowrap;
 }
 
+.workspace-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  margin-left: auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-sunk);
+}
+
+.workspace-switch button {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  padding: 0.3rem 0.65rem;
+  min-height: 30px;
+  font-size: 0.75rem;
+  box-shadow: none;
+}
+
+.workspace-switch button.is-on {
+  background: var(--surface);
+  color: var(--pine-deep);
+  box-shadow: var(--shadow-xs);
+}
+
+.wallet-stats .stat-number {
+  font-size: clamp(1.35rem, 1.1rem + 1vw, 2rem);
+}
+
+.money-number {
+  white-space: nowrap;
+}
+
+.finder-actions {
+  margin: 1.5rem 0 2.5rem;
+}
+
+.compact-form {
+  max-width: 680px;
+}
+
+.row-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.form-grid,
+.proof-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.workflow {
+  display: grid;
+  gap: 1rem;
+}
+
+.workflow-card,
+.recovery-setup,
+.handover-actions {
+  display: grid;
+  gap: 1rem;
+}
+
+.quote-summary,
+.payment-summary p,
+.evidence-summary,
+.receipt-code {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.quote-summary,
+.payment-summary,
+.receipt-panel,
+.evidence-summary,
+.message-panel {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunk);
+}
+
+.payment-summary {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.payment-summary .total {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line-strong);
+  color: var(--ink);
+}
+
+.receipt-panel,
+.confirm-code,
+.conversation,
+.message-panel {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.receipt-code {
+  align-items: center;
+  padding: 0.8rem 1rem;
+  border: 1px dashed var(--pine);
+  background: var(--surface);
+}
+
+.receipt-code strong {
+  font-family: var(--mono);
+  font-size: 1.5rem;
+  letter-spacing: 0;
+}
+
+.message-list {
+  display: grid;
+  gap: 0.55rem;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.message {
+  width: fit-content;
+  max-width: min(85%, 520px);
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.message.mine {
+  margin-left: auto;
+  color: var(--pine-ink);
+  background: var(--pine-wash);
+  border-color: var(--pine-line);
+}
+
+.message time {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--ink-4);
+  font-size: 0.7rem;
+}
+
+.message-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+}
+
+.message-form button {
+  width: 42px;
+  padding: 0;
+}
+
 /* --------------------------------------------------------------------------
    Page shell
    -------------------------------------------------------------------------- */
@@ -1087,6 +1249,7 @@ legend {
 
 /* Neither good nor bad — nothing has happened yet. */
 .status-unverified,
+.status-inconclusive,
 .status-archived {
   background: var(--surface-sunk);
   border-color: var(--line-strong);
@@ -1833,6 +1996,16 @@ legend {
 
   .segmented button {
     flex: 1;
+  }
+
+  .workspace-switch {
+    order: 4;
+    margin-left: 0;
+  }
+
+  .form-grid,
+  .proof-grid {
+    grid-template-columns: 1fr;
   }
 }
 
