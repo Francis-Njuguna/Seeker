@@ -25,6 +25,16 @@ htmlcov/
 uploads/
 backend/uploads/
 
+# Video files. A 599 MB mp4 once reached images/ and blocked every push until
+# it was rewritten out of history — GitHub hard-rejects blobs over 100 MB, and
+# deleting the file in a later commit does not undo that. frontend/.gitignore
+# only covered the frontend, so this rule is deliberately repo-wide.
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+
 # Editors and OS
 .vscode/
 .idea/
