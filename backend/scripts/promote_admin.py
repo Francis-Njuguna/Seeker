@@ -19,6 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
+
+# Running ``python scripts/promote_admin.py`` puts ``scripts/`` on sys.path, not
+# the backend root, so ``import app`` fails even though the cwd is correct. Fix
+# it here rather than via PYTHONPATH in compose: the script then works unchanged
+# under docker exec, a bare shell, or cron, with no environment setup to get
+# wrong — and getting it wrong is how you end up locked out of the admin role.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import func, select
 
