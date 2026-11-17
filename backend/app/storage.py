@@ -5,7 +5,7 @@ import io
 import uuid
 from pathlib import Path
 
-from PIL import Image, ImageFilter, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 
 from app.config import settings
 
