@@ -84,13 +84,16 @@ async def test_search_by_exact_name_finds_document(
     await post_found(finder, holder_name="Jane Alice Doe")
 
     response = await client.post(
-        "/api/search", json={"name": "jane alice doe"}, headers=seeker.headers
+        "/api/search",
+        json={"name": "jane alice doe", "date_of_birth": "1995-04-12"},
+        headers=seeker.headers,
     )
     body = response.json()
     assert body["found"] is True
-    assert body["matched_on"] == "name"
-    # Name matches are ambiguous, so they do not create a claimable match.
-    assert body["match_ids"] == []
+    assert body["matched_on"] == "name_and_date_of_birth"
+    # Name+DOB is specific enough to open a claimable match. (The old
+    # name-only search deliberately returned a teaser with no match id.)
+    assert len(body["match_ids"]) == 1
 
 
 async def test_partial_name_does_not_match(
@@ -101,7 +104,9 @@ async def test_partial_name_does_not_match(
     await post_found(finder, holder_name="Jane Alice Doe")
 
     response = await client.post(
-        "/api/search", json={"name": "Jane Doe"}, headers=seeker.headers
+        "/api/search",
+        json={"name": "Jane Doe", "date_of_birth": "1995-04-12"},
+        headers=seeker.headers,
     )
     assert response.json()["found"] is False
 

@@ -12,8 +12,15 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
-async def _approved_claim(client, make_user, post_found, id_number="AB123456"):
-    """Get a match all the way to awaiting_payment. Returns the whole cast."""
+async def _approved_claim(
+    client, make_user, post_found, promote_admin, id_number="AB123456"
+):
+    """Get a match all the way to awaiting_payment. Returns the whole cast.
+
+    A typed-number claim is fallback evidence: the finder's approval parks it
+    for admin review, and only an admin decision makes checkout possible. The
+    review is completed here so callers start from awaiting_payment.
+    """
     finder = await make_user()
     seeker = await make_user()
     found = await post_found(finder, id_number=id_number)
@@ -32,7 +39,18 @@ async def _approved_claim(client, make_user, post_found, id_number="AB123456"):
         json={"approve": True},
         headers=finder.headers,
     )
-    assert decision.json()["status"] == "awaiting_payment"
+    assert decision.json()["status"] == "claim_requested"
+    assert decision.json()["finder_approved_at"]
+
+    admin = await make_user()
+    await promote_admin(admin)
+    review = await client.post(
+        f"/api/admin/claims/{match_id}/decision",
+        json={"approve": True, "note": "Fixture: fallback claim accepted"},
+        headers=admin.headers,
+    )
+    assert review.status_code == 200, review.text
+    assert review.json()["status"] == "awaiting_payment"
     return finder, seeker, found, match_id
 
 
@@ -69,9 +87,9 @@ def test_amount_is_two_hundred_kes_in_minor_units() -> None:
 
 
 async def test_initiate_returns_a_checkout_url_and_the_split(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
-    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
 
     response = await client.post(
         f"/api/payments/{match_id}/initiate",
@@ -89,9 +107,9 @@ async def test_initiate_returns_a_checkout_url_and_the_split(
 
 
 async def test_initiate_is_idempotent_so_a_double_click_cannot_double_charge(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
-    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
 
     first = await client.post(
         f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
@@ -104,7 +122,7 @@ async def test_initiate_is_idempotent_so_a_double_click_cannot_double_charge(
 
 
 async def test_initiate_rejects_a_claim_that_was_never_approved(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
     finder = await make_user()
     seeker = await make_user()
@@ -121,9 +139,9 @@ async def test_initiate_rejects_a_claim_that_was_never_approved(
 
 
 async def test_stranger_cannot_initiate_payment_on_someone_elses_match(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
-    _, _, _, match_id = await _approved_claim(client, make_user, post_found)
+    _, _, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     attacker = await make_user()
 
     response = await client.post(
@@ -133,9 +151,9 @@ async def test_stranger_cannot_initiate_payment_on_someone_elses_match(
 
 
 async def test_initiate_refuses_a_second_payment_once_paid(
-    client: httpx.AsyncClient, make_user, post_found, pay_for
+    client: httpx.AsyncClient, make_user, post_found, pay_for, promote_admin
 ) -> None:
-    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     await pay_for(match_id, seeker)
 
     response = await client.post(
@@ -148,9 +166,9 @@ async def test_initiate_refuses_a_second_payment_once_paid(
 
 
 async def test_webhook_advances_the_match_to_claimed(
-    client: httpx.AsyncClient, make_user, post_found, pay_for
+    client: httpx.AsyncClient, make_user, post_found, pay_for, promote_admin
 ) -> None:
-    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     result = await pay_for(match_id, seeker)
 
     assert result["webhook"]["status"] == "paid"
@@ -160,14 +178,14 @@ async def test_webhook_advances_the_match_to_claimed(
 
 
 async def test_record_stays_hidden_until_the_webhook_confirms_payment(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
     """The requirement in one test: approval + initiation are not enough.
 
     Only the provider callback releases the details, so a seeker who reaches
     checkout and stops there learns nothing they did not already know.
     """
-    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
 
     approved = await client.get(f"/api/found-ids/{found['id']}", headers=seeker.headers)
     assert "id_number" not in approved.json()
@@ -193,7 +211,7 @@ async def test_webhook_replay_is_idempotent(
     client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
     """Providers retry. A second delivery must not pay the finder twice."""
-    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     started = await client.post(
         f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
     )
@@ -217,20 +235,43 @@ async def test_webhook_replay_is_idempotent(
     assert stats.json()["finder_payouts"] == 10000
 
 
-async def test_webhook_writes_exactly_one_earning_row(
-    client: httpx.AsyncClient, make_user, post_found, db_session
+async def test_handover_writes_exactly_one_earning_row(
+    client: httpx.AsyncClient, make_user, post_found, promote_admin, db_session
 ) -> None:
+    """Escrow: the webhook holds the money; the receipt code releases it, once."""
     from sqlalchemy import func, select
 
     from app.models import Earning
 
-    _, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    finder, seeker, _, match_id = await _approved_claim(
+        client, make_user, post_found, promote_admin
+    )
+    quote = await client.put(
+        f"/api/deliveries/{match_id}/quote",
+        json={"method": "meetup", "destination_address": "Campus Security Office"},
+        headers=seeker.headers,
+    )
+    assert quote.status_code == 200, quote.text
+
     started = await client.post(
         f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
     )
     payload = {"reference": started.json()["reference"], "status": "paid"}
     await client.post("/api/payments/webhook", json=payload)
     await client.post("/api/payments/webhook", json=payload)
+
+    # Paid, but nothing is earned yet: the money is held in escrow.
+    count = await db_session.scalar(select(func.count()).select_from(Earning))
+    assert count == 0
+
+    delivery = await client.get(f"/api/deliveries/{match_id}", headers=seeker.headers)
+    assert delivery.status_code == 200, delivery.text
+    confirmed = await client.post(
+        f"/api/deliveries/{match_id}/confirm",
+        json={"code": delivery.json()["handover_code"]},
+        headers=finder.headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
 
     count = await db_session.scalar(select(func.count()).select_from(Earning))
     assert count == 1
@@ -258,9 +299,9 @@ async def test_webhook_rejects_a_payload_with_no_reference(
 
 
 async def test_failed_payment_leaves_the_record_locked(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
-    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     started = await client.post(
         f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
     )
@@ -278,10 +319,10 @@ async def test_failed_payment_leaves_the_record_locked(
 
 
 async def test_pending_status_does_not_release_the_record(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
     """An intermediate provider status is not a payment."""
-    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     started = await client.post(
         f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
     )
@@ -297,10 +338,10 @@ async def test_pending_status_does_not_release_the_record(
 
 
 async def test_mock_checkout_completes_the_payment(
-    client: httpx.AsyncClient, make_user, post_found
+    client: httpx.AsyncClient, make_user, post_found, promote_admin
 ) -> None:
     """The sandbox checkout page stands in for the customer paying."""
-    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found)
+    _, seeker, found, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     started = await client.post(
         f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
     )
@@ -314,9 +355,9 @@ async def test_mock_checkout_completes_the_payment(
 
 
 async def test_payment_notifies_both_parties(
-    client: httpx.AsyncClient, make_user, post_found, pay_for
+    client: httpx.AsyncClient, make_user, post_found, pay_for, promote_admin
 ) -> None:
-    finder, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    finder, seeker, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     await pay_for(match_id, seeker)
 
     seeker_notes = await client.get("/api/notifications", headers=seeker.headers)
@@ -326,9 +367,9 @@ async def test_payment_notifies_both_parties(
 
 
 async def test_payment_status_is_seeker_only(
-    client: httpx.AsyncClient, make_user, post_found, pay_for
+    client: httpx.AsyncClient, make_user, post_found, pay_for, promote_admin
 ) -> None:
-    finder, seeker, _, match_id = await _approved_claim(client, make_user, post_found)
+    finder, seeker, _, match_id = await _approved_claim(client, make_user, post_found, promote_admin)
     await pay_for(match_id, seeker)
 
     # Even the finder, who is party to the match, does not read the payer's

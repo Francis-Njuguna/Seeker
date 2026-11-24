@@ -77,10 +77,15 @@ async def test_finder_sees_incoming_claim(
     assert body[0]["match"]["id"] == match_id
 
 
-async def test_approval_parks_at_awaiting_payment(
+async def test_approval_of_fallback_claim_parks_for_admin_review(
     client: httpx.AsyncClient, make_user, post_found
 ) -> None:
-    """Approval alone does not reach claimed — the payment webhook does that."""
+    """Approval alone does not reach claimed - the payment webhook does that.
+
+    For a fallback claim (typed number only), finder approval additionally
+    parks at CLAIM_REQUESTED until an admin clears the review queue; only then
+    does payment become possible.
+    """
     finder, seeker, found, match_id = await _matched_pair(client, make_user, post_found)
     await client.post(
         f"/api/matches/{match_id}/claim",
@@ -92,7 +97,9 @@ async def test_approval_parks_at_awaiting_payment(
         json={"approve": True},
         headers=finder.headers,
     )
-    assert response.json()["status"] == "awaiting_payment"
+    body = response.json()
+    assert body["status"] == "claim_requested"
+    assert body["finder_approved_at"], "finder approval must be recorded"
 
 
 async def test_payment_advances_status_to_claimed(
@@ -216,7 +223,11 @@ async def test_decision_requires_a_pending_claim(
 async def test_full_lifecycle_reaches_completed(
     client: httpx.AsyncClient, make_user, post_found, pay_for
 ) -> None:
-    """matched -> claim_requested -> awaiting_payment -> claimed -> completed."""
+    """matched -> claim_requested -> awaiting_payment -> claimed -> returned.
+
+    Completion goes through the receipt code: the legacy /complete route only
+    reports the state that delivery confirmation already owns.
+    """
     finder, seeker, found, match_id = await _matched_pair(client, make_user, post_found)
 
     await client.post(
@@ -229,10 +240,21 @@ async def test_full_lifecycle_reaches_completed(
         json={"approve": True},
         headers=finder.headers,
     )
-    await pay_for(match_id, seeker)
+    await pay_for(match_id, seeker, meetup_quote=True)
+
+    delivery = await client.get(f"/api/deliveries/{match_id}", headers=seeker.headers)
+    assert delivery.status_code == 200, delivery.text
+    confirmed = await client.post(
+        f"/api/deliveries/{match_id}/confirm",
+        json={"code": delivery.json()["handover_code"]},
+        headers=finder.headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
     response = await client.post(
         f"/api/matches/{match_id}/complete", headers=seeker.headers
     )
+    assert response.status_code == 200, response.text
     assert response.json()["status"] == "completed"
 
     record = await client.get(f"/api/found-ids/{found['id']}", headers=finder.headers)

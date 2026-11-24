@@ -264,7 +264,7 @@ async def test_a_genuine_selfie_verifies_the_claim_through_the_api(
         f"/api/matches/{match_id}/claim", json={}, headers=seeker.headers
     )
     assert claim.status_code == 200, claim.text
-    assert claim.json()["verification_method"] == "face_selfie"
+    assert claim.json()["verification_method"] == "manual_fallback"
 
 
 async def test_an_impostor_selfie_fails_and_is_flagged_for_a_human(

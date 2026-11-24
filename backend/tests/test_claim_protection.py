@@ -86,14 +86,18 @@ async def test_a_claimed_document_disappears_from_name_search(
     await post_found(finder, id_number="LOCK002", holder_name="Peter Kamau Njoroge")
 
     before = await client.post(
-        "/api/search", json={"name": "Peter Kamau Njoroge"}, headers=stranger.headers
+        "/api/search",
+        json={"name": "Peter Kamau Njoroge", "date_of_birth": "1995-04-12"},
+        headers=stranger.headers,
     )
     assert before.json()["found"] is True
 
     await _start_claim(client, claimant, "LOCK002")
 
     after = await client.post(
-        "/api/search", json={"name": "Peter Kamau Njoroge"}, headers=stranger.headers
+        "/api/search",
+        json={"name": "Peter Kamau Njoroge", "date_of_birth": "1995-04-12"},
+        headers=stranger.headers,
     )
     assert after.json()["found"] is False
     assert after.json()["results"] == []
@@ -324,7 +328,7 @@ async def test_taking_the_lock_is_not_proof_of_ownership(
         f"/api/matches/{match_id}/claim", json={}, headers=claimant.headers
     )
     assert naked.status_code == 403
-    assert "prove ownership" in naked.json()["detail"].lower()
+    assert "ownership evidence" in naked.json()["detail"].lower()
 
     wrong = await client.post(
         f"/api/matches/{match_id}/claim",

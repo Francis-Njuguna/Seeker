@@ -182,16 +182,22 @@ async def test_failed_verification_does_not_unlock_a_claim(
     assert response.status_code == 403
 
 
-async def test_typed_number_still_works_and_is_recorded_as_such(
+async def test_typed_number_still_works_and_is_recorded_as_fallback(
     client: httpx.AsyncClient, make_user, post_found
 ) -> None:
+    """A typed number is accepted evidence, but it is only a fallback rung.
+
+    Since the verification-ladder rework, a typed number alone cannot verify
+    identity (anyone who glimpsed the document can type it), so the claim is
+    recorded as ``manual_fallback`` and routes through admin review.
+    """
     _, seeker, _, match_id = await _matched_pair(client, make_user, post_found)
     response = await client.post(
         f"/api/matches/{match_id}/claim",
         json={"id_number": "AB123456"},
         headers=seeker.headers,
     )
-    assert response.json()["verification_method"] == "id_number_typed"
+    assert response.json()["verification_method"] == "manual_fallback"
 
 
 async def test_stranger_cannot_verify_someone_elses_match(

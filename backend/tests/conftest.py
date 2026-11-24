@@ -127,20 +127,80 @@ async def promote_admin(db_session: AsyncSession):
 
 
 @pytest_asyncio.fixture
-async def pay_for(client: httpx.AsyncClient):
+async def pay_for(client: httpx.AsyncClient, promote_admin):
     """Take an approved claim through payment: initiate, then fire the webhook.
 
     Mirrors what the mock provider's checkout page does, so tests exercise the
     real release path rather than setting the status directly.
-    """
 
-    async def _pay(match_id: str, seeker: UserSession) -> dict:
+    Fallback claims (typed number, selfie-only) require admin review after the
+    finder approves, so a claim can legitimately be parked at CLAIM_REQUESTED
+    when payment is requested. When that happens this fixture completes the
+    admin review exactly as the admin console would, then retries — the tests
+    below are about payment, not about the review ladder.
+    """
+    admin_headers: dict[str, str] | None = None
+
+    async def _ensure_admin() -> dict[str, str]:
+        nonlocal admin_headers
+        if admin_headers is None:
+            response = await client.post(
+                "/api/auth/register",
+                json={
+                    "email": "pay-admin@example.com",
+                    "password": "correct-horse-battery",
+                    "display_name": "Pay Admin",
+                },
+            )
+            assert response.status_code == 201, response.text
+            admin = UserSession(response.json())
+            await promote_admin(admin)
+            admin_headers = admin.headers
+        return admin_headers
+
+    async def _pay(
+        match_id: str, seeker: UserSession, *, meetup_quote: bool = False
+    ) -> dict:
+        """Pay an approved claim.
+
+        ``meetup_quote`` plans a free meetup fulfilment first. Escrow tests need
+        it because the payment webhook only issues a receipt code when a
+        delivery plan exists, and only that code releases the finder's earning.
+        """
         started = await client.post(
             f"/api/payments/{match_id}/initiate",
             json={"phone": "+254700000000"},
             headers=seeker.headers,
         )
+        if started.status_code == 409 and "claim_requested" in started.text:
+            # Fallback claim parked for admin review after finder approval.
+            # Complete the review, then pay.
+            review = await client.post(
+                f"/api/admin/claims/{match_id}/decision",
+                json={"approve": True, "note": "Fixture: fallback claim accepted"},
+                headers=await _ensure_admin(),
+            )
+            assert review.status_code == 200, review.text
+            started = await client.post(
+                f"/api/payments/{match_id}/initiate",
+                json={"phone": "+254700000000"},
+                headers=seeker.headers,
+            )
         assert started.status_code == 200, started.text
+
+        if meetup_quote:
+            # Quoted after initiation: meetup is free, so the split is unchanged,
+            # and the webhook below will issue the receipt code.
+            quoted = await client.put(
+                f"/api/deliveries/{match_id}/quote",
+                json={
+                    "method": "meetup",
+                    "destination_address": "Campus Security Office",
+                },
+                headers=seeker.headers,
+            )
+            assert quoted.status_code == 200, quoted.text
+
         reference = started.json()["reference"]
 
         webhook = await client.post(
@@ -154,15 +214,23 @@ async def pay_for(client: httpx.AsyncClient):
 
 @pytest_asyncio.fixture
 async def post_found(client: httpx.AsyncClient):
-    """Post a found ID without an image (skips OCR, which needs a real photo)."""
+    """Post a found ID without an image (skips OCR, which needs a real photo).
+
+    A date of birth is included by default: name search now requires name+DOB
+    to match on both the stored record and the query, so name-based tests need
+    the stored DOB to exist. A pickup address is included too, because delivery
+    quotes (and therefore escrow handover) require one.
+    """
 
     async def _post(
         user: UserSession,
         *,
         id_number: str = "AB123456",
         holder_name: str = "Jane Alice Doe",
+        holder_date_of_birth: str | None = "1995-04-12",
         document_type: str = "national_id",
         found_location: str | None = "Central Station",
+        pickup_address: str | None = "Campus Security Office, Gate A",
     ) -> dict:
         response = await client.post(
             "/api/found-ids",
@@ -170,7 +238,9 @@ async def post_found(client: httpx.AsyncClient):
                 "document_type": document_type,
                 "holder_name": holder_name,
                 "id_number": id_number,
+                "holder_date_of_birth": holder_date_of_birth or "",
                 "found_location": found_location or "",
+                "pickup_address": pickup_address or "",
                 "run_ocr": "false",
             },
             headers=user.headers,

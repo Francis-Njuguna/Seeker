@@ -270,8 +270,10 @@ async def test_verified_selfie_is_an_accepted_proof_for_a_claim(
 ) -> None:
     """The third rung of the ladder: a passed selfie claims without the number.
 
-    The verdict is set directly here rather than through a real portrait — what
-    is under test is that ``request_claim`` honours it, not the maths.
+    The verdict is set directly here rather than through a real portrait - what
+    is under test is that ``request_claim`` honours it, not the maths. A selfie
+    alone is fallback evidence, so the claim is accepted but recorded as
+    ``manual_fallback`` and waits for admin review.
     """
     import uuid
 
@@ -293,7 +295,7 @@ async def test_verified_selfie_is_an_accepted_proof_for_a_claim(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "claim_requested"
-    assert body["verification_method"] == "face_selfie"
+    assert body["verification_method"] == "manual_fallback"
 
 
 async def test_claim_without_any_proof_is_refused(

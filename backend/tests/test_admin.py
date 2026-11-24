@@ -131,12 +131,20 @@ async def test_revenue_counts_only_payments_the_webhook_confirmed(
         json={"approve": True},
         headers=finder.headers,
     )
-    await client.post(
-        f"/api/payments/{unpaid_match}/initiate", json={}, headers=seeker.headers
-    )
-
+    # A fallback claim parks for admin review; clear the queue so checkout opens.
     admin = await make_user()
     await promote_admin(admin)
+    review = await client.post(
+        f"/api/admin/claims/{unpaid_match}/decision",
+        json={"approve": True, "note": "Fixture: fallback claim accepted"},
+        headers=admin.headers,
+    )
+    assert review.status_code == 200, review.text
+    started = await client.post(
+        f"/api/payments/{unpaid_match}/initiate", json={}, headers=seeker.headers
+    )
+    assert started.status_code == 200, started.text
+
     body = (await client.get("/api/admin/stats", headers=admin.headers)).json()
 
     assert body["total_transactions"] == 2
@@ -236,12 +244,20 @@ async def test_ledger_shows_an_unpaid_transaction_without_a_paid_timestamp(
         json={"approve": True},
         headers=finder.headers,
     )
-    await client.post(
-        f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
-    )
-
+    # A fallback claim parks for admin review; clear the queue so checkout opens.
     admin = await make_user()
     await promote_admin(admin)
+    review = await client.post(
+        f"/api/admin/claims/{match_id}/decision",
+        json={"approve": True, "note": "Fixture: fallback claim accepted"},
+        headers=admin.headers,
+    )
+    assert review.status_code == 200, review.text
+    started = await client.post(
+        f"/api/payments/{match_id}/initiate", json={}, headers=seeker.headers
+    )
+    assert started.status_code == 200, started.text
+
     rows = (await client.get("/api/admin/transactions", headers=admin.headers)).json()
 
     assert rows[0]["status"] == "initiated"
@@ -264,7 +280,7 @@ async def test_claims_list_records_how_identity_was_proven(
 
     assert len(rows) == 1
     assert rows[0]["match_id"] == match_id
-    assert rows[0]["verification_method"] == "id_number_typed"
+    assert rows[0]["verification_method"] == "manual_fallback"
     assert rows[0]["status"] == "claimed"
     assert rows[0]["payment_status"] == "paid"
     assert rows[0]["seeker_email"] == seeker.email
