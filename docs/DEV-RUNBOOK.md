@@ -19,7 +19,9 @@ docker compose up -d db
 # poll: docker inspect seeker-db-1 --format "{{.State.Health.Status}}"  -> healthy
 
 # 3. Backend WITHOUT the file watcher (see "watchfiles" below).
-docker compose run -d --service-ports backend uvicorn app.main:app --host 0.0.0.0 --port 8000
+#    Use the override file: it keeps the compose service name, so the frontend
+#    can still resolve http://backend:8000, while dropping --reload.
+docker compose -f docker-compose.yml -f docker-compose.noreload.yml up -d backend
 
 # 4. Frontend
 docker compose up -d frontend   # vite at http://localhost:5173
@@ -38,6 +40,7 @@ curl.exe -s --max-time 20 http://127.0.0.1:8000/api/health
 | Health probe "connection closed unexpectedly" | PowerShell `Invoke-WebRequest` flakiness on this box | Use `curl.exe`; retry once before diagnosing |
 | Engine dies entirely (pipe gone, no processes) | Docker Desktop instability on this machine — observed 4× in one day | Restart Docker Desktop, wait for engine, `up -d db`, wait healthy, then services |
 | Port 8000 already allocated | Ad-hoc `compose run --service-ports` container holds it | `docker rm -f` the `backend-run-*` container before `up` |
+| UI loads but every API call fails; `curl http://localhost:8000/api/health` works | `docker compose run` does **not** give the container the `backend` network alias, so the Vite proxy target does not resolve | Start the backend as a compose **service** with `-f docker-compose.noreload.yml` (do not use `compose run` for the long-lived server) |
 
 ### Test suite
 
@@ -67,7 +70,8 @@ keeps each run short enough to survive the machine's engine instability.
 
 Baseline lineage:
 - `backend/baseline.txt` — Aug 12 (203 passed, 1 skipped; pre-verification-ladder-rework)
-- `backend/baseline-2026-11-17.txt` — current machine, post-rework contract
+- `backend/baseline-2026-11-24.txt` — **current** (266 passed, 1 skipped, 267
+  collected; verified in six chunks after the contract repairs)
 
 ### The post-August contract every test must satisfy
 

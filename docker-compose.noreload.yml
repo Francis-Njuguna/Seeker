@@ -1,0 +1,14 @@
+# Dev/demo override: run the backend WITHOUT uvicorn --reload.
+#
+# Why: uvicorn's reloader (watchfiles) loses inotify events on the Windows
+# bind mount (./backend:/app) and can kill the container. See docs/INCIDENTS.md
+# INC-4. For demos and test sessions, use:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.noreload.yml up -d
+#
+# That keeps the normal compose service name/network alias (frontend proxies
+# /api to http://backend:8000) while removing the reloader.
+
+services:
+  backend:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
