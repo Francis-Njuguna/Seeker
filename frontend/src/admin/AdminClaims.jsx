@@ -54,7 +54,7 @@ export default function AdminClaims() {
         onReload={reload}
       />
 
-      {state || (
+      {loading || error || rows.length === 0 ? state : (
         <>
           <div className="admin-filters">
             <div className="field">

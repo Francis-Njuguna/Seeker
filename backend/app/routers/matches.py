@@ -582,8 +582,9 @@ async def verify_face(
         raise HTTPException(
             status_code=422,
             detail=(
-                "The posted photo has no detectable face to compare against. "
-                "Use the full ID number or upload a photo of the document."
+                "No face detected in the posted document. The photo has no "
+                "portrait the system can compare against — upload a clearer "
+                "photo of the document, or prove ownership with the full ID number."
             ),
         )
 
@@ -602,11 +603,11 @@ async def verify_face(
             if known_embedding is None:
                 match.face_verification_status = FaceVerificationStatus.NO_FACE_ON_RECORD
                 await db.commit()
-                raise HTTPException(status_code=422, detail="No face detected on the posted document")
+                raise HTTPException(status_code=422, detail="No face detected in the posted document")
         else:
             known_embedding = None
         if known_embedding is None:
-            raise HTTPException(status_code=422, detail="No face detected on the posted document")
+            raise HTTPException(status_code=422, detail="No face detected in the posted document")
         outcome = face.compare(known_embedding, pil_image, threshold=settings.face_match_threshold)
     except face.MultiFaceError as exc:
         # More than one face in the selfie is ambiguous, not a failed match, so

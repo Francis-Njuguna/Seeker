@@ -61,7 +61,7 @@ export default function AdminFlagged() {
         onReload={reload}
       />
 
-      {state || (
+      {loading || error || rows.length === 0 ? state : (
         <>
           <div className="notice warn">
             <Icon.AlertTriangle />
