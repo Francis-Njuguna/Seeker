@@ -1,0 +1,45 @@
+SEEKER — test baseline, 2026-11-24
+==================================
+
+Suite: backend/tests/ (15 files, 267 tests)
+Environment: Docker Desktop 29.5.3 on WSL2, Python 3.12, Postgres 16
+Command (per chunk):
+
+  docker compose run --rm -e SEEKER_TESTING=1 ^
+    -e TEST_DATABASE_URL=postgresql+asyncpg://seeker:seeker@db:5432/seeker_test ^
+    backend python -m pytest <files> -q --tb=short
+
+Why chunked: this machine (8 GB RAM, 4 cores, single C: drive) restarted the
+Docker engine during long runs while the disk was nearly full. Disk pressure is
+now resolved (C: ~59 GB free, Docker data disk compacted 67 GB -> 11.8 GB), but
+the chunk commands are kept in docs/DEV-RUNBOOK.md as the reliable path.
+
+RESULTS
+-------
+
+  1. tests/test_payments.py                                    20 passed   (2:45)
+  2. tests/test_earnings.py tests/test_admin.py                 35 passed   (5:12)
+  3. tests/test_matches.py tests/test_search.py                 28 passed   (4:12)
+       - test_matches.py 17, test_search.py 11
+  4. tests/test_auth.py tests/test_claim_protection.py
+     tests/test_verification.py tests/test_found_and_alerts.py  60 passed  (10:01)
+  5. tests/test_documents.py tests/test_ocr.py
+     tests/test_normalize.py                                    74 passed   (6:43)
+  6. tests/test_face.py tests/test_face_integration.py
+     tests/test_mvp_recovery.py                                 49 passed, 1 skipped (8:16)
+
+TOTAL: 266 passed, 1 skipped, 0 failed  (267 collected)
+
+The single skip is intentional (optional/platform-dependent path) and is not a
+failure. Re-run with `-rs` to print the reason if it needs naming.
+
+CONTEXT
+-------
+
+- No product code changed for this baseline. Only tests were corrected to the
+  post-August contract: typed ID number -> manual_fallback + admin review;
+  name search requires name + DOB and yields a claimable match; escrow writes
+  `Earning` at confirm_handover, never at the payment webhook; handover requires
+  finder approval.
+- Failures seen earlier in this cycle were stale assertions, not regressions.
+  See docs/INCIDENTS.md (branch diagnostics/engine-and-test-failures).
