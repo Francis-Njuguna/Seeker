@@ -41,3 +41,6 @@ backend/uploads/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local DB dumps (dev backups)
+backend/backups/
